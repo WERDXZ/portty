@@ -213,8 +213,21 @@ impl Session {
             Request::GetOptions => Response::Options(self.options.clone()),
             Request::GetSelection => Response::Selection(self.selection.clone()),
             Request::Select(uris) => {
-                // Just update selection, don't kill terminal
-                self.selection = uris;
+                // Add to selection (deduplicated)
+                for uri in uris {
+                    if !self.selection.contains(&uri) {
+                        self.selection.push(uri);
+                    }
+                }
+                Response::Ok
+            }
+            Request::Deselect(uris) => {
+                // Remove from selection
+                self.selection.retain(|u| !uris.contains(u));
+                Response::Ok
+            }
+            Request::Clear => {
+                self.selection.clear();
                 Response::Ok
             }
             Request::Cancel => {

@@ -1,6 +1,7 @@
 use std::io::BufRead;
 use std::process::ExitCode;
 
+use clap::Parser;
 use portty_types::ipc::file_chooser::{Request, Response};
 
 use crate::to_uri;
@@ -20,35 +21,56 @@ pub fn dispatch(command: &str, args: &[String]) -> ExitCode {
     }
 }
 
+#[derive(Parser)]
+#[command(name = "select", about = "Manage file selection")]
+struct SelectArgs {
+    /// Show session options (filters, title, etc.)
+    #[arg(short = 'o', long)]
+    options: bool,
+
+    /// Clear all selection
+    #[arg(short, long)]
+    clear: bool,
+
+    /// Remove files from selection (instead of adding)
+    #[arg(short, long)]
+    deselect: bool,
+
+    /// Read files from stdin (one per line)
+    #[arg(long)]
+    stdin: bool,
+
+    /// Files to select
+    files: Vec<String>,
+}
+
 fn cmd_select(args: &[String]) -> ExitCode {
-    // Parse args manually (--options, --stdin, or files)
-    let mut show_options = false;
-    let mut from_stdin = false;
-    let mut files = Vec::new();
-
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "-o" | "--options" => show_options = true,
-            "--stdin" => from_stdin = true,
-            "-h" | "--help" => {
-                print_select_help();
-                return ExitCode::SUCCESS;
-            }
-            _ if arg.starts_with('-') => {
-                eprintln!("Unknown option: {arg}");
-                return ExitCode::from(1);
-            }
-            _ => files.push(arg.clone()),
+    let args = match SelectArgs::try_parse_from(
+        std::iter::once("select".to_string()).chain(args.iter().cloned()),
+    ) {
+        Ok(args) => args,
+        Err(e) => {
+            e.print().ok();
+            return if e.kind() == clap::error::ErrorKind::DisplayHelp
+                || e.kind() == clap::error::ErrorKind::DisplayVersion
+            {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            };
         }
-    }
+    };
 
-    if show_options {
+    if args.options {
         return show_session_options();
     }
 
+    if args.clear {
+        return clear_selection();
+    }
+
     // Get URIs from args or stdin
-    let uris: Vec<String> = if from_stdin {
+    let uris: Vec<String> = if args.stdin {
         std::io::stdin()
             .lock()
             .lines()
@@ -57,7 +79,7 @@ fn cmd_select(args: &[String]) -> ExitCode {
             .map(|l| to_uri(&l))
             .collect()
     } else {
-        files.iter().map(|a| to_uri(a)).collect()
+        args.files.iter().map(|a| to_uri(a)).collect()
     };
 
     // If no files provided, show current selection
@@ -65,8 +87,14 @@ fn cmd_select(args: &[String]) -> ExitCode {
         return show_selection();
     }
 
-    // Send selection to daemon
-    match send_request(&Request::Select(uris)) {
+    // Send request to daemon
+    let request = if args.deselect {
+        Request::Deselect(uris)
+    } else {
+        Request::Select(uris)
+    };
+
+    match send_request(&request) {
         Ok(Response::Ok) => ExitCode::SUCCESS,
         Ok(Response::Error(e)) => {
             eprintln!("Error: {e}");
@@ -77,21 +105,28 @@ fn cmd_select(args: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
         Err(e) => {
-            eprintln!("Failed to send selection: {e}");
+            eprintln!("Failed to send request: {e}");
             ExitCode::from(1)
         }
     }
 }
 
-fn print_select_help() {
-    println!("Usage: select [OPTIONS] [FILES...]");
-    println!();
-    println!("Options:");
-    println!("  -o, --options  Show session options (filters, title, etc.)");
-    println!("  --stdin        Read files from stdin (one per line)");
-    println!("  -h, --help     Show this help");
-    println!();
-    println!("If no files are provided, shows the current selection.");
+fn clear_selection() -> ExitCode {
+    match send_request(&Request::Clear) {
+        Ok(Response::Ok) => ExitCode::SUCCESS,
+        Ok(Response::Error(e)) => {
+            eprintln!("Error: {e}");
+            ExitCode::from(1)
+        }
+        Ok(resp) => {
+            eprintln!("Unexpected response: {resp:?}");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("Failed to clear selection: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn show_session_options() -> ExitCode {
@@ -148,6 +183,7 @@ fn show_selection() -> ExitCode {
         }
     }
 }
+
 
 fn cmd_cancel() -> ExitCode {
     match send_request(&Request::Cancel) {

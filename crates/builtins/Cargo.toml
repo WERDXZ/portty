@@ -9,6 +9,8 @@ path = "src/lib.rs"
 [dependencies]
 portty-types = { path = "../types" }
 serde = "1"
+clap = { version = "4", features = ["derive"] }
+
 
 [[bin]]
 name = "portty-builtin"

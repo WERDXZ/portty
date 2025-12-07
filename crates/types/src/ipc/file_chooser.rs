@@ -9,8 +9,14 @@ pub enum Request {
     /// Get current selection
     GetSelection,
 
-    /// Select files (URIs)
+    /// Add files to selection (URIs)
     Select(Vec<String>),
+
+    /// Remove files from selection (URIs)
+    Deselect(Vec<String>),
+
+    /// Clear all selection
+    Clear,
 
     /// Cancel the operation
     Cancel,
