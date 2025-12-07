@@ -1,0 +1,20 @@
+# Portty configuration
+# Place this file at ~/.config/portty/config.toml
+
+# Path to the portty-builtin binary (default: /usr/lib/portty/portty-builtin)
+# builtin_path = "/usr/lib/portty/portty-builtin"
+
+# Default terminal command for all portals
+[default]
+exec = "foot -e /bin/sh"
+
+# Override for specific portals
+[file-chooser]
+exec = "foot -e /bin/sh"
+
+# Future portals:
+# [screenshot]
+# exec = "foot -e screenshot-picker"
+#
+# [notification]
+# exec = "foot -e notify-handler"

@@ -1,0 +1,15 @@
+[package]
+name = "portty-builtins"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+portty-types = { path = "../types" }
+serde = "1"
+
+[[bin]]
+name = "portty-builtin"
+path = "src/main.rs"

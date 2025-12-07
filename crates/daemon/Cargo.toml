@@ -1,0 +1,18 @@
+[package]
+name = "porttyd"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "porttyd"
+path = "src/main.rs"
+
+[dependencies]
+portty-types = { path = "../types" }
+zbus = "5.12.0"
+futures-lite = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

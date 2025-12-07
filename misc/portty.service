@@ -1,0 +1,13 @@
+[Unit]
+Description=Portty - XDG Desktop Portal for TTY
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/portty/porttyd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

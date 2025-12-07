@@ -1,0 +1,4 @@
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.tty
+Interfaces=org.freedesktop.impl.portal.FileChooser
+UseIn=tty;sway;Hyprland;river;dwl;cage;labwc;wayfire;wlroots;i3;bspwm;dwm;awesome;xmonad;qtile;herbstluftwm;openbox;fluxbox
