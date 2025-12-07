@@ -26,15 +26,22 @@ impl TtyFileChooser {
         portal: &str,
         options: SessionOptions,
     ) -> Result<FileChooserResult, FileChooserError> {
-        let exec = self
-            .config
-            .get_exec(portal)
+        let portal_config = self.config.get_portal_config(portal);
+        let exec = portal_config
+            .exec
+            .as_deref()
+            .or(self.config.default.exec.as_deref())
             .ok_or_else(|| FileChooserError::Other("no exec configured".to_string()))?;
 
         debug!(exec, portal, "Creating session");
 
-        let mut session = Session::new(portal, options, &self.config.builtin_path)
-            .map_err(|e| FileChooserError::Other(format!("failed to create session: {e}")))?;
+        let mut session = Session::new(
+            portal,
+            options,
+            &self.config.builtin_path,
+            &portal_config.bin,
+        )
+        .map_err(|e| FileChooserError::Other(format!("failed to create session: {e}")))?;
 
         session
             .spawn(exec, portal)

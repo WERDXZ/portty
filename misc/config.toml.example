@@ -6,15 +6,20 @@
 
 # Default terminal command for all portals
 [default]
-exec = "foot -e /bin/sh"
+exec = "foot"
 
 # Override for specific portals
 [file-chooser]
-exec = "foot -e /bin/sh"
+exec = "foot"
+
+# Custom commands available in the session
+# These are added to $PATH alongside the default builtins (select, cancel)
+[file-chooser.bin]
+# Quick pick with fzf
+pick = "fzf --multi | select --stdin"
+# Preview files
+preview = "bat \"$@\""
 
 # Future portals:
 # [screenshot]
 # exec = "foot -e screenshot-picker"
-#
-# [notification]
-# exec = "foot -e notify-handler"

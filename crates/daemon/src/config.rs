@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -7,7 +8,38 @@ use serde::Deserialize;
 pub struct PortalConfig {
     /// Command to execute for this portal
     /// e.g. "foot -e /bin/sh" or "foot -e fzf-picker"
+    #[serde(default)]
     pub exec: Option<String>,
+
+    /// Custom bin shims for this portal
+    /// e.g. { "pick" = "fzf --multi | select --stdin" }
+    #[serde(default)]
+    pub bin: HashMap<String, String>,
+}
+
+/// Try to find a terminal emulator
+fn detect_terminal() -> Option<String> {
+    // Check common terminals in order of preference
+    let terminals = [
+        "foot",
+        "alacritty",
+        "kitty",
+        "wezterm",
+        "ghostty",
+        "xterm",
+    ];
+
+    for term in terminals {
+        if std::process::Command::new("which")
+            .arg(term)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Some(term.to_string());
+        }
+    }
+    None
 }
 
 /// Main configuration
@@ -48,7 +80,10 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             builtin_path: default_builtin_path(),
-            default: PortalConfig::default(),
+            default: PortalConfig {
+                exec: detect_terminal(),
+                bin: HashMap::new(),
+            },
             file_chooser: PortalConfig::default(),
             screenshot: PortalConfig::default(),
         }
@@ -69,17 +104,12 @@ impl Config {
         dirs::config_dir().map(|p| p.join("portty/config.toml"))
     }
 
-    /// Get exec command for a portal, falling back to default
-    pub fn get_exec(&self, portal: &str) -> Option<&str> {
-        let portal_config = match portal {
+    /// Get portal-specific config
+    pub fn get_portal_config(&self, portal: &str) -> &PortalConfig {
+        match portal {
             "file-chooser" => &self.file_chooser,
             "screenshot" => &self.screenshot,
             _ => &self.default,
-        };
-
-        portal_config
-            .exec
-            .as_deref()
-            .or(self.default.exec.as_deref())
+        }
     }
 }

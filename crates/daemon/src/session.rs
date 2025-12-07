@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
@@ -7,8 +8,8 @@ use std::process::{Child, Command};
 use portty_types::ipc::file_chooser::{Request, Response, SessionOptions};
 use portty_types::ipc::{read_message, write_message};
 
-/// Commands available for each portal type
-fn portal_commands(portal: &str) -> &'static [&'static str] {
+/// Default commands for each portal type
+fn default_commands(portal: &str) -> &'static [&'static str] {
     match portal {
         "file-chooser" => &["select", "cancel"],
         _ => &[],
@@ -46,7 +47,12 @@ pub struct Session {
 
 impl Session {
     /// Create a new session with its directory
-    pub fn new(portal: &str, options: SessionOptions, builtin_path: &str) -> std::io::Result<Self> {
+    pub fn new(
+        portal: &str,
+        options: SessionOptions,
+        builtin_path: &str,
+        custom_bins: &HashMap<String, String>,
+    ) -> std::io::Result<Self> {
         let id = SessionId::new();
         let dir = session_dir(&id);
 
@@ -60,12 +66,25 @@ impl Session {
         let bin_dir = dir.join("bin");
         fs::create_dir_all(&bin_dir)?;
 
-        for cmd in portal_commands(portal) {
+        // Create default command shims
+        for cmd in default_commands(portal) {
+            // Skip if overridden by custom bin
+            if custom_bins.contains_key(*cmd) {
+                continue;
+            }
             let shim_path = bin_dir.join(cmd);
             let shim_content = format!(
                 "#!/bin/sh\nexec \"{}\" \"{}\" \"{}\" \"$@\"\n",
                 builtin_path, portal, cmd
             );
+            fs::write(&shim_path, shim_content)?;
+            fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))?;
+        }
+
+        // Create custom bin shims
+        for (name, command) in custom_bins {
+            let shim_path = bin_dir.join(name);
+            let shim_content = format!("#!/bin/sh\n{}\n", command);
             fs::write(&shim_path, shim_content)?;
             fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))?;
         }
