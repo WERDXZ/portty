@@ -1,12 +1,10 @@
-//! Submission queue for pre-queued portal commands
+//! Submission queue types
 //!
-//! Allows users to queue file selections before dialogs open.
-//! When a session spawns, it pops a submission from the queue.
-
-use std::fs;
-use std::path::PathBuf;
+//! Queue is owned by daemon, CLI interacts via IPC.
 
 use serde::{Deserialize, Serialize};
+
+use crate::PortalType;
 
 /// A command that can be queued
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,12 +21,11 @@ pub struct Submission {
     pub commands: Vec<QueuedCommand>,
     /// Unix timestamp when created
     pub created: u64,
-    /// Optional portal type filter (e.g., "file-chooser")
-    /// If None, matches any portal
-    pub portal: Option<String>,
+    /// Target portal type (None = any)
+    pub portal: Option<PortalType>,
 }
 
-/// The submission queue
+/// The submission queue (owned by daemon)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubmissionQueue {
     /// Pending commands not yet submitted
@@ -48,7 +45,7 @@ impl SubmissionQueue {
     }
 
     /// Create a submission from pending commands
-    pub fn submit(&mut self, portal: Option<String>) {
+    pub fn submit(&mut self, portal: Option<PortalType>) {
         if self.pending.is_empty() {
             return;
         }
@@ -68,10 +65,10 @@ impl SubmissionQueue {
     }
 
     /// Pop a submission matching the given portal type
-    pub fn pop_for_portal(&mut self, portal: &str) -> Option<Submission> {
+    pub fn pop_for_portal(&mut self, portal: PortalType) -> Option<Submission> {
         // Find first matching submission (None matches any portal)
         let idx = self.submissions.iter().position(|s| {
-            s.portal.as_ref().map_or(true, |p| p == portal)
+            s.portal.map_or(true, |p| p == portal)
         })?;
 
         Some(self.submissions.remove(idx))
@@ -87,46 +84,14 @@ impl SubmissionQueue {
         self.pending.clear();
         self.submissions.clear();
     }
-}
 
-/// Get the queue file path
-pub fn queue_path() -> PathBuf {
-    use std::os::unix::fs::MetadataExt;
-    let uid = fs::metadata("/proc/self")
-        .map(|m| m.uid())
-        .unwrap_or(0);
-    PathBuf::from(format!("/tmp/portty/{}/queue.bin", uid))
-}
-
-/// Read queue from file
-pub fn read_queue() -> SubmissionQueue {
-    let path = queue_path();
-    match fs::read(&path) {
-        Ok(data) => bincode::deserialize(&data).unwrap_or_default(),
-        Err(_) => SubmissionQueue::new(),
-    }
-}
-
-/// Write queue to file
-pub fn write_queue(queue: &SubmissionQueue) -> std::io::Result<()> {
-    let path = queue_path();
-
-    // Ensure directory exists
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    /// Iterate over pending commands
+    pub fn pending_iter(&self) -> impl Iterator<Item = &QueuedCommand> {
+        self.pending.iter()
     }
 
-    let data = bincode::serialize(queue)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-
-    fs::write(&path, data)
-}
-
-/// Clear queue file
-pub fn clear_queue() -> std::io::Result<()> {
-    let path = queue_path();
-    if path.exists() {
-        fs::remove_file(&path)?;
+    /// Iterate over submissions
+    pub fn submissions_iter(&self) -> impl Iterator<Item = &Submission> {
+        self.submissions.iter()
     }
-    Ok(())
 }

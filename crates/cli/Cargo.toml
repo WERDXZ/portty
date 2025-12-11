@@ -11,5 +11,3 @@ path = "src/main.rs"
 portty-ipc = { path = "../ipc" }
 clap = { version = "4", features = ["derive"] }
 percent-encoding = "2"
-serde = { version = "1", features = ["derive"] }
-bincode = "1"

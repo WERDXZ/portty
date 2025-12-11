@@ -5,6 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::queue::{QueuedCommand, Submission};
+use crate::PortalType;
+
 /// Request from CLI to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonRequest {
@@ -21,6 +24,26 @@ pub enum DaemonRequest {
         /// The command to execute
         command: CliCommand,
     },
+
+    // Queue operations (queue is owned by daemon)
+
+    /// Add command to pending queue
+    QueuePush(QueuedCommand),
+
+    /// Bundle pending into submission
+    QueueSubmit {
+        /// Target portal type (None = any)
+        portal: Option<PortalType>,
+    },
+
+    /// Clear pending commands
+    QueueClearPending,
+
+    /// Clear all (pending + submissions)
+    QueueClearAll,
+
+    /// Get queue status
+    QueueStatus,
 }
 
 /// Abstract CLI command (daemon translates to portal-specific)
@@ -51,6 +74,10 @@ pub enum DaemonResponse {
     Session(SessionInfo),
     /// Command execution result
     CommandResult(CommandResult),
+    /// Queue status
+    QueueStatus(QueueStatusInfo),
+    /// Simple OK
+    Ok,
     /// Error occurred
     Error(String),
 }
@@ -60,14 +87,27 @@ pub enum DaemonResponse {
 pub struct SessionInfo {
     /// Unique session identifier
     pub id: String,
-    /// Portal type (e.g., "file-chooser", "screenshot")
-    pub portal: String,
+    /// Portal type
+    pub portal: PortalType,
     /// Session title (from portal options)
     pub title: Option<String>,
     /// Unix timestamp when session was created
     pub created: u64,
     /// Path to session socket (for direct CLI connection)
     pub socket_path: String,
+}
+
+/// Queue status information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueStatusInfo {
+    /// Number of pending commands
+    pub pending_count: usize,
+    /// Pending commands
+    pub pending: Vec<QueuedCommand>,
+    /// Number of submissions waiting
+    pub submissions_count: usize,
+    /// Submissions waiting
+    pub submissions: Vec<Submission>,
 }
 
 /// Result of executing a command on a session

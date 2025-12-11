@@ -3,75 +3,76 @@ use std::sync::{Arc, RwLock};
 use tracing::{debug, info, instrument};
 
 use crate::config::Config;
-use crate::daemon_socket::{RegisteredSession, SessionRegistry};
+use crate::daemon_socket::{DaemonState, RegisteredSession};
 use crate::session::{Session, SessionResult};
 use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SessionOptions};
 use portty_ipc::portal::file_chooser::{
     FileChooserError, FileChooserHandler, FileChooserResult, FileFilter, OpenFileOptions,
     SaveFileOptions, SaveFilesOptions, FilterPattern as PortalFilterPattern,
 };
-use portty_ipc::queue::{self, QueuedCommand};
+use portty_ipc::queue::QueuedCommand;
+use portty_ipc::PortalType;
 
 /// File chooser handler that spawns terminals
 pub struct TtyFileChooser {
     config: Arc<Config>,
-    registry: Arc<RwLock<SessionRegistry>>,
+    state: Arc<RwLock<DaemonState>>,
 }
 
 impl TtyFileChooser {
-    pub fn new(config: Arc<Config>, registry: Arc<RwLock<SessionRegistry>>) -> Self {
+    pub fn new(config: Arc<Config>, state: Arc<RwLock<DaemonState>>) -> Self {
         debug!("FileChooser initialized");
-        Self { config, registry }
+        Self { config, state }
     }
 
     fn run_session(
         &self,
-        portal: &str,
+        portal: PortalType,
         options: SessionOptions,
     ) -> Result<FileChooserResult, FileChooserError> {
         // Check for queued submission first
-        let mut q = queue::read_queue();
-        if let Some(submission) = q.pop_for_portal(portal) {
-            info!(
-                portal,
-                commands = submission.commands.len(),
-                "Found queued submission, auto-applying"
-            );
+        {
+            let mut st = self.state.write().unwrap();
+            if let Some(submission) = st.queue.pop_for_portal(portal) {
+                info!(
+                    %portal,
+                    commands = submission.commands.len(),
+                    "Found queued submission, auto-applying"
+                );
 
-            // Save updated queue
-            let _ = queue::write_queue(&q);
-
-            // Apply queued commands to get URIs
-            let mut selection: Vec<String> = Vec::new();
-            for cmd in submission.commands {
-                match cmd {
-                    QueuedCommand::Select(uris) => {
-                        for uri in uris {
-                            if !selection.contains(&uri) {
-                                selection.push(uri);
+                // Apply queued commands to get URIs
+                let mut selection: Vec<String> = Vec::new();
+                for cmd in submission.commands {
+                    match cmd {
+                        QueuedCommand::Select(uris) => {
+                            for uri in uris {
+                                if !selection.contains(&uri) {
+                                    selection.push(uri);
+                                }
                             }
                         }
-                    }
-                    QueuedCommand::Deselect(uris) => {
-                        selection.retain(|u| !uris.contains(u));
-                    }
-                    QueuedCommand::Clear => {
-                        selection.clear();
+                        QueuedCommand::Deselect(uris) => {
+                            selection.retain(|u| !uris.contains(u));
+                        }
+                        QueuedCommand::Clear => {
+                            selection.clear();
+                        }
                     }
                 }
-            }
 
-            if selection.is_empty() {
-                info!("Queued submission resulted in empty selection, cancelling");
-                return Err(FileChooserError::Cancelled);
-            }
+                if selection.is_empty() {
+                    info!("Queued submission resulted in empty selection, cancelling");
+                    return Err(FileChooserError::Cancelled);
+                }
 
-            info!(?selection, "Queued submission applied");
-            return Ok(FileChooserResult::new().uris(selection));
+                info!(?selection, "Queued submission applied");
+                return Ok(FileChooserResult::new().uris(selection));
+            }
         }
 
         // No queued submission - run interactive session
-        let portal_config = self.config.get_portal_config(portal);
+        let portal_str = portal.as_str();
+        let portal_config = self.config.get_portal_config(portal_str);
 
         // Get exec command - None means headless mode
         let exec = portal_config
@@ -82,13 +83,13 @@ impl TtyFileChooser {
 
         let headless = exec.is_none();
         if headless {
-            info!(portal, "Starting headless session (use `portty` CLI to interact)");
+            info!(%portal, "Starting headless session (use `portty` CLI to interact)");
         } else {
-            debug!(exec, portal, "Creating session");
+            debug!(exec, %portal, "Creating session");
         }
 
         let mut session = Session::new(
-            portal,
+            portal_str,
             options,
             &self.config.builtin_path,
             &portal_config.bin,
@@ -98,10 +99,10 @@ impl TtyFileChooser {
         // Register session before spawning
         let session_id = session.id().to_string();
         {
-            let mut reg = self.registry.write().unwrap();
-            reg.register(RegisteredSession {
+            let mut st = self.state.write().unwrap();
+            st.sessions.register(RegisteredSession {
                 id: session_id.clone(),
-                portal: session.portal().to_string(),
+                portal,
                 title: session.title().map(String::from),
                 created: session.created(),
                 socket_path: session.socket_path(),
@@ -111,7 +112,7 @@ impl TtyFileChooser {
         // Only spawn terminal in non-headless mode
         if let Some(exec) = exec {
             session
-                .spawn(exec, portal)
+                .spawn(exec, portal_str)
                 .map_err(|e| FileChooserError::Other(format!("failed to spawn: {e}")))?;
         }
 
@@ -121,8 +122,8 @@ impl TtyFileChooser {
 
         // Unregister session after completion
         {
-            let mut reg = self.registry.write().unwrap();
-            reg.unregister(&session_id);
+            let mut st = self.state.write().unwrap();
+            st.sessions.unregister(&session_id);
         }
 
         match result {
@@ -188,7 +189,7 @@ impl FileChooserHandler for TtyFileChooser {
             current_filter: None, // TODO: find index
         };
 
-        self.run_session("file-chooser", session_options)
+        self.run_session(PortalType::FileChooser, session_options)
     }
 
     #[instrument(skip(self, _parent_window, options))]
@@ -215,7 +216,7 @@ impl FileChooserHandler for TtyFileChooser {
             current_filter: None,
         };
 
-        self.run_session("file-chooser", session_options)
+        self.run_session(PortalType::FileChooser, session_options)
     }
 
     #[instrument(skip(self, _parent_window, options))]
@@ -242,6 +243,6 @@ impl FileChooserHandler for TtyFileChooser {
             current_filter: None,
         };
 
-        self.run_session("file-chooser", session_options)
+        self.run_session(PortalType::FileChooser, session_options)
     }
 }

@@ -8,7 +8,8 @@ use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use portty_ipc::daemon::{DaemonRequest, DaemonResponse, SessionInfo};
 use portty_ipc::ipc::file_chooser::{Request as SessionRequest, Response as SessionResponse};
 use portty_ipc::ipc::{read_message, write_message};
-use portty_ipc::queue::{self, QueuedCommand};
+use portty_ipc::queue::QueuedCommand;
+use portty_ipc::PortalType;
 
 /// Portty - interact with XDG portal sessions from the command line
 #[derive(Parser)]
@@ -164,32 +165,46 @@ fn cmd_list() -> ExitCode {
 
 /// Show queued commands and submissions
 fn cmd_show_queue() -> ExitCode {
-    let q = queue::read_queue();
-
-    if q.pending.is_empty() && q.submissions.is_empty() {
-        println!("Queue is empty");
-        return ExitCode::SUCCESS;
-    }
-
-    if !q.pending.is_empty() {
-        println!("Pending commands ({}):", q.pending.len());
-        for (i, cmd) in q.pending.iter().enumerate() {
-            print_command(i + 1, cmd, "  ");
-        }
-    }
-
-    if !q.submissions.is_empty() {
-        println!("Submissions ({}):", q.submissions.len());
-        for (i, sub) in q.submissions.iter().enumerate() {
-            let portal = sub.portal.as_deref().unwrap_or("any");
-            println!("  {}. [{}] {} command(s)", i + 1, portal, sub.commands.len());
-            for cmd in &sub.commands {
-                print_command(0, cmd, "       ");
+    match send_daemon_request(&DaemonRequest::QueueStatus) {
+        Ok(DaemonResponse::QueueStatus(status)) => {
+            if status.pending.is_empty() && status.submissions.is_empty() {
+                println!("Queue is empty");
+                return ExitCode::SUCCESS;
             }
+
+            if !status.pending.is_empty() {
+                println!("Pending commands ({}):", status.pending_count);
+                for (i, cmd) in status.pending.iter().enumerate() {
+                    print_command(i + 1, cmd, "  ");
+                }
+            }
+
+            if !status.submissions.is_empty() {
+                println!("Submissions ({}):", status.submissions_count);
+                for (i, sub) in status.submissions.iter().enumerate() {
+                    let portal = sub.portal.map_or("any".to_string(), |p| p.to_string());
+                    println!("  {}. [{}] {} command(s)", i + 1, portal, sub.commands.len());
+                    for cmd in &sub.commands {
+                        print_command(0, cmd, "       ");
+                    }
+                }
+            }
+
+            ExitCode::SUCCESS
+        }
+        Ok(DaemonResponse::Error(e)) => {
+            eprintln!("Error: {e}");
+            ExitCode::from(1)
+        }
+        Ok(resp) => {
+            eprintln!("Unexpected response: {resp:?}");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::from(1)
         }
     }
-
-    ExitCode::SUCCESS
 }
 
 fn print_command(num: usize, cmd: &QueuedCommand, indent: &str) {
@@ -308,10 +323,8 @@ fn parse_files(files: &[String], stdin: bool) -> Result<Vec<String>, String> {
     }
 }
 
-/// Run command in queued mode
+/// Run command in queued mode (via daemon)
 fn run_queued(cmd: Command) -> ExitCode {
-    let mut q = queue::read_queue();
-
     match cmd {
         Command::Select { files, stdin } => {
             let uris = match parse_files(&files, stdin) {
@@ -327,13 +340,24 @@ fn run_queued(cmd: Command) -> ExitCode {
                 return run_immediate(None, Command::Select { files: vec![], stdin: false });
             }
 
-            q.push_command(QueuedCommand::Select(uris));
-            if let Err(e) = queue::write_queue(&q) {
-                eprintln!("Error: {e}");
-                return ExitCode::from(1);
+            match send_daemon_request(&DaemonRequest::QueuePush(QueuedCommand::Select(uris))) {
+                Ok(DaemonResponse::Ok) => {
+                    println!("Queued select");
+                    ExitCode::SUCCESS
+                }
+                Ok(DaemonResponse::Error(e)) => {
+                    eprintln!("Error: {e}");
+                    ExitCode::from(1)
+                }
+                Ok(resp) => {
+                    eprintln!("Unexpected response: {resp:?}");
+                    ExitCode::from(1)
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::from(1)
+                }
             }
-            println!("Queued select ({} pending)", q.pending.len());
-            ExitCode::SUCCESS
         }
 
         Command::Deselect { files } => {
@@ -345,58 +369,96 @@ fn run_queued(cmd: Command) -> ExitCode {
                 }
             };
 
-            q.push_command(QueuedCommand::Deselect(uris));
-            if let Err(e) = queue::write_queue(&q) {
-                eprintln!("Error: {e}");
-                return ExitCode::from(1);
+            match send_daemon_request(&DaemonRequest::QueuePush(QueuedCommand::Deselect(uris))) {
+                Ok(DaemonResponse::Ok) => {
+                    println!("Queued deselect");
+                    ExitCode::SUCCESS
+                }
+                Ok(DaemonResponse::Error(e)) => {
+                    eprintln!("Error: {e}");
+                    ExitCode::from(1)
+                }
+                Ok(resp) => {
+                    eprintln!("Unexpected response: {resp:?}");
+                    ExitCode::from(1)
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::from(1)
+                }
             }
-            println!("Queued deselect ({} pending)", q.pending.len());
-            ExitCode::SUCCESS
         }
 
         Command::Clear => {
-            q.push_command(QueuedCommand::Clear);
-            if let Err(e) = queue::write_queue(&q) {
-                eprintln!("Error: {e}");
-                return ExitCode::from(1);
+            match send_daemon_request(&DaemonRequest::QueuePush(QueuedCommand::Clear)) {
+                Ok(DaemonResponse::Ok) => {
+                    println!("Queued clear");
+                    ExitCode::SUCCESS
+                }
+                Ok(DaemonResponse::Error(e)) => {
+                    eprintln!("Error: {e}");
+                    ExitCode::from(1)
+                }
+                Ok(resp) => {
+                    eprintln!("Unexpected response: {resp:?}");
+                    ExitCode::from(1)
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::from(1)
+                }
             }
-            println!("Queued clear ({} pending)", q.pending.len());
-            ExitCode::SUCCESS
         }
 
         Command::Submit { portal } => {
-            if q.pending.is_empty() {
-                println!("No pending commands to submit");
-                return ExitCode::SUCCESS;
-            }
+            let portal_type = portal.as_ref().and_then(|s| PortalType::from_str(s));
 
-            let count = q.pending.len();
-            q.submit(portal.clone());
-            if let Err(e) = queue::write_queue(&q) {
-                eprintln!("Error: {e}");
+            // Validate portal string if provided
+            if portal.is_some() && portal_type.is_none() {
+                eprintln!("Unknown portal type: {}", portal.unwrap());
                 return ExitCode::from(1);
             }
 
-            let portal_str = portal.as_deref().unwrap_or("any");
-            println!("Created submission with {} command(s) for [{}]", count, portal_str);
-            println!("{} submission(s) waiting", q.submissions.len());
-            ExitCode::SUCCESS
+            match send_daemon_request(&DaemonRequest::QueueSubmit { portal: portal_type }) {
+                Ok(DaemonResponse::Ok) => {
+                    let portal_str = portal_type.map_or("any".to_string(), |p| p.to_string());
+                    println!("Created submission for [{}]", portal_str);
+                    ExitCode::SUCCESS
+                }
+                Ok(DaemonResponse::Error(e)) => {
+                    eprintln!("Error: {e}");
+                    ExitCode::from(1)
+                }
+                Ok(resp) => {
+                    eprintln!("Unexpected response: {resp:?}");
+                    ExitCode::from(1)
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::from(1)
+                }
+            }
         }
 
         Command::Cancel => {
-            let pending_count = q.pending.len();
-            q.clear_pending();
-            if let Err(e) = queue::write_queue(&q) {
-                eprintln!("Error: {e}");
-                return ExitCode::from(1);
+            match send_daemon_request(&DaemonRequest::QueueClearPending) {
+                Ok(DaemonResponse::Ok) => {
+                    println!("Cleared pending commands");
+                    ExitCode::SUCCESS
+                }
+                Ok(DaemonResponse::Error(e)) => {
+                    eprintln!("Error: {e}");
+                    ExitCode::from(1)
+                }
+                Ok(resp) => {
+                    eprintln!("Unexpected response: {resp:?}");
+                    ExitCode::from(1)
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::from(1)
+                }
             }
-
-            if pending_count > 0 {
-                println!("Cleared {} pending command(s)", pending_count);
-            } else {
-                println!("No pending commands");
-            }
-            ExitCode::SUCCESS
         }
     }
 }

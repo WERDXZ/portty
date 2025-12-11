@@ -46,7 +46,6 @@ impl std::fmt::Display for SessionId {
 /// A running session
 pub struct Session {
     id: SessionId,
-    portal: String,
     dir: PathBuf,
     child: Option<Child>,
     listener: Option<UnixListener>,
@@ -112,7 +111,6 @@ impl Session {
 
         Ok(Self {
             id,
-            portal: portal.to_string(),
             dir,
             child: None,
             listener: Some(listener),
@@ -125,11 +123,6 @@ impl Session {
     /// Get session ID
     pub fn id(&self) -> &SessionId {
         &self.id
-    }
-
-    /// Get portal type
-    pub fn portal(&self) -> &str {
-        &self.portal
     }
 
     /// Get session title (from options)

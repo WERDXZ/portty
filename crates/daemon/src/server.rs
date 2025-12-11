@@ -4,7 +4,7 @@ use tracing::{info, warn};
 use zbus::connection::Builder;
 
 use crate::config::Config;
-use crate::daemon_socket::{DaemonSocket, SessionRegistry};
+use crate::daemon_socket::{DaemonSocket, DaemonState};
 use crate::portal::TtyFileChooser;
 use portty_ipc::portal::file_chooser::FileChooserPortal;
 
@@ -13,20 +13,20 @@ const OBJECT_PATH: &str = "/org/freedesktop/portal/desktop";
 
 pub struct Server {
     config: Arc<Config>,
-    registry: Arc<RwLock<SessionRegistry>>,
+    state: Arc<RwLock<DaemonState>>,
 }
 
 impl Server {
     pub fn new(config: Config) -> Self {
         Self {
             config: Arc::new(config),
-            registry: Arc::new(RwLock::new(SessionRegistry::new())),
+            state: Arc::new(RwLock::new(DaemonState::new())),
         }
     }
 
     pub async fn run(self) -> Result<(), zbus::Error> {
         // Start daemon socket in background thread
-        match DaemonSocket::new(Arc::clone(&self.registry)) {
+        match DaemonSocket::new(Arc::clone(&self.state)) {
             Ok(daemon_socket) => {
                 daemon_socket.spawn();
                 info!("Daemon socket started");
@@ -57,7 +57,7 @@ impl Server {
         info!("Registering FileChooser portal");
         let file_chooser = TtyFileChooser::new(
             Arc::clone(&self.config),
-            Arc::clone(&self.registry),
+            Arc::clone(&self.state),
         );
         let builder = builder
             .serve_at(OBJECT_PATH, FileChooserPortal::from(file_chooser))?;
