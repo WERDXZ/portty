@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use thiserror::Error;
 
+use portty_ipc::ipc::file_chooser::SessionOptions;
 use portty_ipc::ipc::{IpcError, read_message, write_message};
 use portty_ipc::queue::QueuedCommand;
 use portty_ipc::{
@@ -83,6 +84,9 @@ enum Command {
 
     /// Reset selection to initial defaults
     Reset,
+
+    /// Show session options and current selection
+    Info,
 
     /// Cancel the operation
     Cancel,
@@ -410,6 +414,9 @@ fn run_session_command(socket_path: &str, cmd: Command) -> ExitCode {
         Command::Clear => Request::Clear,
         Command::Reset => Request::Reset,
         Command::Submit { .. } => Request::Submit,
+        Command::Info => {
+            return run_session_info(socket_path);
+        }
         Command::Cancel => Request::Cancel,
     };
 
@@ -422,9 +429,7 @@ fn run_session_command(socket_path: &str, cmd: Command) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Response::Options(opts)) => {
-            println!("Title: {}", opts.title);
-            println!("Multiple: {}", opts.multiple);
-            println!("Directory: {}", opts.directory);
+            print_options(&opts);
             ExitCode::SUCCESS
         }
         Ok(Response::Error(e)) => {
@@ -436,6 +441,67 @@ fn run_session_command(socket_path: &str, cmd: Command) -> ExitCode {
             eprintln!("{e}");
             ExitCode::from(1)
         }
+    }
+}
+
+/// Print session options
+fn print_options(opts: &SessionOptions) {
+    println!("Title: {}", opts.title);
+    println!("Mode: {}", opts.mode);
+    if let Some(ref folder) = opts.current_folder {
+        println!("Folder: {}", folder);
+    }
+    if !opts.candidates.is_empty() {
+        println!("Candidates:");
+        for c in &opts.candidates {
+            println!("  {c}");
+        }
+    }
+    if !opts.filters.is_empty() {
+        println!("Filters:");
+        for f in &opts.filters {
+            let patterns: Vec<String> = f.patterns.iter().map(|p| p.to_string()).collect();
+            println!("  {}: {}", f.name, patterns.join(", "));
+        }
+    }
+}
+
+/// Run info command on session: fetches options and selection, prints both
+fn run_session_info(socket_path: &str) -> ExitCode {
+    match send_session_request(socket_path, &Request::GetOptions) {
+        Ok(Response::Options(opts)) => print_options(&opts),
+        Ok(Response::Error(e)) => {
+            eprintln!("Error getting options: {e}");
+            return ExitCode::from(1);
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(1);
+        }
+        _ => {}
+    }
+
+    match send_session_request(socket_path, &Request::GetSelection) {
+        Ok(Response::Selection(uris)) => {
+            println!("Selection:");
+            if uris.is_empty() {
+                println!("  (empty)");
+            } else {
+                for uri in &uris {
+                    println!("  {uri}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(Response::Error(e)) => {
+            eprintln!("Error getting selection: {e}");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::from(1)
+        }
+        _ => ExitCode::SUCCESS,
     }
 }
 
@@ -600,6 +666,18 @@ fn run_daemon_command(session_id: Option<String>, cmd: Command) -> ExitCode {
                     ExitCode::from(1)
                 }
             }
+        }
+
+        Command::Info => {
+            // Info routes to active session
+            let session = match get_session(session_id) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            run_session_info(&session.socket_path)
         }
 
         Command::Cancel => {

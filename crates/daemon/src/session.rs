@@ -5,7 +5,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SessionOptions};
+use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SelectionMode, SessionOptions};
 use portty_ipc::ipc::{read_message, write_message};
 use portty_ipc::queue::QueuedCommand;
 use portty_ipc::{SessionRequest, SessionResponse};
@@ -16,7 +16,7 @@ use tracing::warn;
 fn default_commands(portal: &str) -> &'static [(&'static str, &'static str)] {
     match portal {
         // "sel" shim avoids conflict with POSIX `select` builtin
-        "file-chooser" => &[("sel", "select"), ("desel", "deselect"), ("reset", "reset"), ("submit", "submit"), ("cancel", "cancel")],
+        "file-chooser" => &[("sel", "select"), ("desel", "deselect"), ("reset", "reset"), ("submit", "submit"), ("cancel", "cancel"), ("info", "info")],
         _ => &[],
     }
 }
@@ -84,13 +84,10 @@ pub struct Session {
 
 impl Session {
     /// Create a new session with its directory
-    ///
-    /// If `single_select` is true, selection is limited to 1 item (for SaveFile).
     pub fn new(
         portal: &str,
         options: SessionOptions,
         custom_bins: &HashMap<String, String>,
-        single_select: bool,
     ) -> std::io::Result<Self> {
         let id = SessionId::new();
         let dir = session_dir(&id);
@@ -140,18 +137,22 @@ impl Session {
             .unwrap_or_default()
             .as_secs();
 
-        // Pre-populate selection based on options
+        let single_select = matches!(options.mode, SelectionMode::Save);
+
+        // Pre-populate selection based on mode
         let mut selection = HashSet::new();
-        if let Some(ref folder) = options.current_folder
-            && options.save_mode
-        {
-            if !options.files.is_empty() {
-                // SaveFiles: pre-select the folder
-                selection.insert(format!("file://{}", folder));
-            } else if let Some(ref name) = options.current_name {
-                // SaveFile: pre-select folder/name
-                let path = Path::new(folder).join(name);
-                selection.insert(format!("file://{}", path.display()));
+        if let Some(ref folder) = options.current_folder {
+            match options.mode {
+                SelectionMode::SaveMultiple if !options.candidates.is_empty() => {
+                    selection.insert(format!("file://{}", folder));
+                }
+                SelectionMode::Save => {
+                    if let Some(name) = options.candidates.first() {
+                        let path = Path::new(folder).join(name);
+                        selection.insert(format!("file://{}", path.display()));
+                    }
+                }
+                _ => {}
             }
         }
 

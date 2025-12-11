@@ -8,7 +8,7 @@ use crate::config::{Config, FileChooserOp};
 use crate::daemon_socket::{DaemonState, RegisteredSession};
 use crate::session::{Session, SessionResult};
 use portty_ipc::PortalType;
-use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SessionOptions};
+use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SelectionMode, SessionOptions};
 use portty_ipc::portal::file_chooser::{
     FileChooserError, FileChooserHandler, FileChooserResult, FileFilter,
     FilterPattern as PortalFilterPattern, OpenFileOptions, SaveFileOptions, SaveFilesOptions,
@@ -89,10 +89,13 @@ impl TtyFileChooser {
         }
 
         // Store files for SaveFiles post-processing
-        let save_files = options.files.clone();
-        let is_save_file = op == FileChooserOp::SaveFile;
+        let save_files = if matches!(options.mode, SelectionMode::SaveMultiple) {
+            options.candidates.clone()
+        } else {
+            Vec::new()
+        };
 
-        let mut session = Session::new(portal.as_str(), options, &bin, is_save_file)
+        let mut session = Session::new(portal.as_str(), options, &bin)
             .map_err(|e| FileChooserError::Other(format!("failed to create session: {e}")))?;
 
         // Register session and transfer any pending commands
@@ -232,14 +235,14 @@ impl FileChooserHandler for TtyFileChooser {
 
         let session_options = SessionOptions {
             title,
-            multiple: options.multiple().unwrap_or(false),
-            directory: options.directory().unwrap_or(false),
-            save_mode: false,
-            current_name: None,
+            mode: SelectionMode::Pick {
+                multiple: options.multiple().unwrap_or(false),
+                directory: options.directory().unwrap_or(false),
+            },
             current_folder: options
                 .current_folder()
                 .map(|b| String::from_utf8_lossy(b).into_owned()),
-            files: Vec::new(),
+            candidates: vec![],
             filters: convert_filters(options.filters()),
             current_filter: None,
         };
@@ -261,14 +264,11 @@ impl FileChooserHandler for TtyFileChooser {
 
         let session_options = SessionOptions {
             title,
-            multiple: false,
-            directory: false,
-            save_mode: true,
-            current_name: options.current_name().map(String::from),
+            mode: SelectionMode::Save,
             current_folder: options
                 .current_folder()
                 .map(|b| String::from_utf8_lossy(b).into_owned()),
-            files: Vec::new(),
+            candidates: options.current_name().map(String::from).into_iter().collect(),
             filters: convert_filters(options.filters()),
             current_filter: None,
         };
@@ -305,14 +305,11 @@ impl FileChooserHandler for TtyFileChooser {
 
         let session_options = SessionOptions {
             title,
-            multiple: true,
-            directory: true,
-            save_mode: true,
-            current_name: None,
+            mode: SelectionMode::SaveMultiple,
             current_folder: options
                 .current_folder()
                 .map(|b| String::from_utf8_lossy(b).into_owned()),
-            files,
+            candidates: files,
             filters: Vec::new(),
             current_filter: None,
         };
