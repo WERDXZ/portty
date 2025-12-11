@@ -1,23 +1,31 @@
 # Maintainer: werdxz
 
-pkgname=portty
-pkgver=0.1.0
+pkgname=portty-git
+pkgver=r4.2b533ff
 pkgrel=1
 pkgdesc="XDG Desktop Portal backend for TTY environments"
 arch=('x86_64')
 url="https://github.com/werdxz/portty"
 license=('MIT')
 depends=('xdg-desktop-portal')
-makedepends=('cargo')
-source=()
+makedepends=('cargo' 'git')
+provides=('portty')
+conflicts=('portty')
+source=("${pkgname}::git+https://github.com/werdxz/portty.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$pkgname"
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
 
 build() {
-    cd "$srcdir/.."
+    cd "$pkgname"
     cargo build --release --locked
 }
 
 package() {
-    cd "$srcdir/.."
+    cd "$pkgname"
 
     # Install daemon
     install -Dm755 "target/release/porttyd" "$pkgdir/usr/lib/portty/porttyd"
