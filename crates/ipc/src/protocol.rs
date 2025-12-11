@@ -56,6 +56,9 @@ pub enum Request<Ext> {
     /// Get current selection
     GetSelection,
 
+    /// Reset selection to initial defaults
+    Reset,
+
     // === Extension point ===
     /// Extended commands (daemon-specific when Ext = DaemonExtension)
     Extended(Ext),
@@ -179,6 +182,7 @@ impl From<SessionRequest> for DaemonRequest {
             Request::Cancel => Request::Cancel,
             Request::GetOptions => Request::GetOptions,
             Request::GetSelection => Request::GetSelection,
+            Request::Reset => Request::Reset,
             Request::Extended(never) => match never {},
         }
     }
@@ -228,6 +232,7 @@ mod tests {
             (Request::Clear, Request::Clear),
             (Request::Submit, Request::Submit),
             (Request::Cancel, Request::Cancel),
+            (Request::Reset, Request::Reset),
             (
                 Request::Select(vec!["test".into()]),
                 Request::Select(vec!["test".into()]),
@@ -246,7 +251,7 @@ mod tests {
         let cfg = standard();
         let list: DaemonRequest = Request::Extended(DaemonExtension::ListSessions);
         let bytes = bincode::encode_to_vec(&list, cfg).unwrap();
-        assert_eq!(bytes[0], 7);
+        assert_eq!(bytes[0], 8);
     }
 
     #[test]

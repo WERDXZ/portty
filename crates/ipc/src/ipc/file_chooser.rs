@@ -1,3 +1,5 @@
+use std::{collections::HashMap, fmt::Display};
+
 use bincode::{Decode, Encode};
 
 /// Session options sent to builtins
@@ -33,6 +35,23 @@ pub struct SessionOptions {
     pub current_filter: Option<usize>,
 }
 
+impl SessionOptions {
+    pub fn env(&self) -> HashMap<&'static str, String>{
+        let mut hashmap = HashMap::new();
+        hashmap.insert("PORTTY-TITLE", self.title.clone());
+
+        if let Some(cwd) = &self.current_folder {
+            hashmap.insert("PORTTY-DEFAULT-CWD", cwd.clone());
+        }
+
+        if let Some(file) = &self.current_name {
+            hashmap.insert("PORTTY-DEFAULT-FILE", file.clone());
+        }
+
+        hashmap
+    }
+}
+
 /// File filter
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Filter {
@@ -45,4 +64,14 @@ pub struct Filter {
 pub enum FilterPattern {
     Glob(String),
     MimeType(String),
+}
+
+impl Display for FilterPattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (k, v) = match &self {
+            Self::Glob(s) => ("Glob", s),
+            Self::MimeType(s) => ("Mime", s)
+        };
+        write!(f, "{k} - {v}")
+    }
 }

@@ -16,7 +16,7 @@ use tracing::warn;
 fn default_commands(portal: &str) -> &'static [(&'static str, &'static str)] {
     match portal {
         // "sel" shim avoids conflict with POSIX `select` builtin
-        "file-chooser" => &[("sel", "select"), ("desel", "deselect"), ("submit", "submit"), ("cancel", "cancel")],
+        "file-chooser" => &[("sel", "select"), ("desel", "deselect"), ("reset", "reset"), ("submit", "submit"), ("cancel", "cancel")],
         _ => &[],
     }
 }
@@ -75,6 +75,8 @@ pub struct Session {
     options: SessionOptions,
     /// Selected URIs (HashSet for O(1) lookups and automatic deduplication)
     selection: HashSet<String>,
+    /// Initial selection (for reset)
+    initial_selection: HashSet<String>,
     created: u64,
     /// If true, selection is limited to 1 item (for SaveFile)
     single_select: bool,
@@ -153,6 +155,8 @@ impl Session {
             }
         }
 
+        let initial_selection = selection.clone();
+
         Ok(Self {
             id,
             dir,
@@ -161,6 +165,7 @@ impl Session {
             listener: Some(listener),
             options,
             selection,
+            initial_selection,
             created,
             single_select,
         })
@@ -213,7 +218,7 @@ impl Session {
     }
 
     /// Spawn a terminal with the given exec command
-    pub fn spawn(&mut self, exec: &str, portal: &str) -> std::io::Result<()> {
+    pub fn spawn(&mut self, exec: &str, operation: &str) -> std::io::Result<()> {
         // Parse exec command (simple shell-like splitting)
         let parts: Vec<&str> = exec.split_whitespace().collect();
         if parts.is_empty() {
@@ -231,9 +236,14 @@ impl Session {
 
         let bin_dir = self.dir.join("bin");
 
+        let envs = self.options.env();
+        for (k, v) in envs.iter() {
+            cmd.env(k, v);
+        }
+
         // Inject our environment variables
         cmd.env("PORTTY_SESSION", self.id.as_str());
-        cmd.env("PORTTY_PORTAL", portal);
+        cmd.env("PORTTY_OPERATION", operation);
         cmd.env("PORTTY_DIR", &self.dir);
         cmd.env("PORTTY_SOCK", self.dir.join("sock"));
 
@@ -374,6 +384,10 @@ impl Session {
             }
             Request::Clear => {
                 self.selection.clear();
+                Response::Ok
+            }
+            Request::Reset => {
+                self.selection = self.initial_selection.clone();
                 Response::Ok
             }
             Request::Submit => {

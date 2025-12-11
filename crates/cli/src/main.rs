@@ -81,6 +81,9 @@ enum Command {
         portal: Option<String>,
     },
 
+    /// Reset selection to initial defaults
+    Reset,
+
     /// Cancel the operation
     Cancel,
 }
@@ -405,6 +408,7 @@ fn run_session_command(socket_path: &str, cmd: Command) -> ExitCode {
             Request::Deselect(uris)
         }
         Command::Clear => Request::Clear,
+        Command::Reset => Request::Reset,
         Command::Submit { .. } => Request::Submit,
         Command::Cancel => Request::Cancel,
     };
@@ -524,6 +528,28 @@ fn run_daemon_command(session_id: Option<String>, cmd: Command) -> ExitCode {
             ))) {
                 Ok(Response::Ok) => {
                     println!("Queued clear");
+                    ExitCode::SUCCESS
+                }
+                Ok(Response::Error(e)) => {
+                    eprintln!("Error: {e}");
+                    ExitCode::from(1)
+                }
+                Ok(resp) => {
+                    eprintln!("Unexpected response: {resp:?}");
+                    ExitCode::from(1)
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+
+        Command::Reset => {
+            // Reset goes directly to session, not queued
+            match send_daemon_request(&Request::Reset) {
+                Ok(Response::Ok) => {
+                    println!("Reset to defaults");
                     ExitCode::SUCCESS
                 }
                 Ok(Response::Error(e)) => {

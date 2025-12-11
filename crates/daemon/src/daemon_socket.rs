@@ -216,6 +216,9 @@ fn handle_request(req: DaemonRequest, state: &Arc<RwLock<DaemonState>>) -> Daemo
         Request::GetSelection => {
             route_session_command(state, Request::GetSelection)
         }
+        Request::Reset => {
+            route_session_command(state, Request::Reset)
+        }
 
         // === Daemon-specific extensions ===
         Request::Extended(ext) => handle_daemon_extension(ext, state),

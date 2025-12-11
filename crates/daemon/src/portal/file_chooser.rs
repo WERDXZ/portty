@@ -7,13 +7,13 @@ use tracing::{debug, info, instrument};
 use crate::config::{Config, FileChooserOp};
 use crate::daemon_socket::{DaemonState, RegisteredSession};
 use crate::session::{Session, SessionResult};
+use portty_ipc::PortalType;
 use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SessionOptions};
 use portty_ipc::portal::file_chooser::{
-    FileChooserError, FileChooserHandler, FileChooserResult, FileFilter, OpenFileOptions,
-    SaveFileOptions, SaveFilesOptions, FilterPattern as PortalFilterPattern,
+    FileChooserError, FileChooserHandler, FileChooserResult, FileFilter,
+    FilterPattern as PortalFilterPattern, OpenFileOptions, SaveFileOptions, SaveFilesOptions,
 };
 use portty_ipc::queue::QueuedCommand;
-use portty_ipc::PortalType;
 
 /// File chooser handler that spawns terminals
 pub struct TtyFileChooser {
@@ -80,7 +80,10 @@ impl TtyFileChooser {
 
         let headless = exec.is_none();
         if headless {
-            info!(?op, "Starting headless session (use `portty` CLI to interact)");
+            info!(
+                ?op,
+                "Starting headless session (use `portty` CLI to interact)"
+            );
         } else {
             debug!(?exec, ?op, "Creating session");
         }
@@ -118,7 +121,7 @@ impl TtyFileChooser {
         // Spawn process (terminal or auto-confirm command like "submit")
         if let Some(ref exec) = exec {
             session
-                .spawn(exec, portal.as_str())
+                .spawn(exec, &format!("{} - {}", portal.as_str(), op.as_str()))
                 .map_err(|e| FileChooserError::Other(format!("failed to spawn: {e}")))?;
         }
 
@@ -203,12 +206,8 @@ fn convert_filters(filters: &[FileFilter]) -> Vec<Filter> {
             patterns: f
                 .patterns()
                 .map(|p| match p {
-                    PortalFilterPattern::Glob(s) => {
-                        FilterPattern::Glob(s.to_string())
-                    }
-                    PortalFilterPattern::MimeType(s) => {
-                        FilterPattern::MimeType(s.to_string())
-                    }
+                    PortalFilterPattern::Glob(s) => FilterPattern::Glob(s.to_string()),
+                    PortalFilterPattern::MimeType(s) => FilterPattern::MimeType(s.to_string()),
                 })
                 .collect(),
         })
@@ -245,7 +244,8 @@ impl FileChooserHandler for TtyFileChooser {
             current_filter: None,
         };
 
-        self.run_session(FileChooserOp::OpenFile, session_options).await
+        self.run_session(FileChooserOp::OpenFile, session_options)
+            .await
     }
 
     #[instrument(skip(self, _parent_window, options))]
@@ -273,7 +273,8 @@ impl FileChooserHandler for TtyFileChooser {
             current_filter: None,
         };
 
-        self.run_session(FileChooserOp::SaveFile, session_options).await
+        self.run_session(FileChooserOp::SaveFile, session_options)
+            .await
     }
 
     #[instrument(skip(self, _parent_window, options))]
@@ -316,6 +317,7 @@ impl FileChooserHandler for TtyFileChooser {
             current_filter: None,
         };
 
-        self.run_session(FileChooserOp::SaveFiles, session_options).await
+        self.run_session(FileChooserOp::SaveFiles, session_options)
+            .await
     }
 }

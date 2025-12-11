@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -35,6 +36,22 @@ pub enum FileChooserOp {
     OpenFile,
     SaveFile,
     SaveFiles,
+}
+
+impl FileChooserOp {
+    pub fn as_str(&self) -> &'static str {
+        match &self {
+            Self::OpenFile => "Open File",
+            Self::SaveFile => "Save File",
+            Self::SaveFiles => "Save Files",
+        }
+    }
+}
+
+impl Display for FileChooserOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 /// File chooser extension - sub-operation configs
