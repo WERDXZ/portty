@@ -85,7 +85,11 @@ impl TtyFileChooser {
             debug!(?exec, ?op, "Creating session");
         }
 
-        let mut session = Session::new(portal.as_str(), options, &bin)
+        // Store files for SaveFiles post-processing
+        let save_files = options.files.clone();
+        let is_save_file = op == FileChooserOp::SaveFile;
+
+        let mut session = Session::new(portal.as_str(), options, &bin, is_save_file)
             .map_err(|e| FileChooserError::Other(format!("failed to create session: {e}")))?;
 
         // Register session and transfer any pending commands
@@ -141,9 +145,16 @@ impl TtyFileChooser {
         }
 
         match result {
-            SessionResult::Success { ref uris } => {
-                info!(?uris, "Session completed successfully");
-                Ok(FileChooserResult::new().uris(uris.clone()))
+            SessionResult::Success { uris } => {
+                // For SaveFiles, construct URIs from selected folder + filenames
+                let final_uris = if !save_files.is_empty() {
+                    build_save_files_uris(&uris, &save_files)
+                } else {
+                    uris
+                };
+
+                info!(?final_uris, "Session completed successfully");
+                Ok(FileChooserResult::new().uris(final_uris))
             }
             SessionResult::Cancelled => {
                 info!("Session cancelled");
@@ -151,6 +162,36 @@ impl TtyFileChooser {
             }
         }
     }
+}
+
+/// Build URIs for SaveFiles by appending filenames to the selected folder
+fn build_save_files_uris(selected: &[String], files: &[String]) -> Vec<String> {
+    // Get the folder from selection (use first one, resolve to parent if it's a file)
+    let folder = selected.first().map(|uri| {
+        // Strip file:// prefix if present
+        let path = uri.strip_prefix("file://").unwrap_or(uri);
+        let path = std::path::Path::new(path);
+
+        // If it's a file, use parent directory
+        if path.is_file() {
+            path.parent().unwrap_or(path).to_path_buf()
+        } else {
+            path.to_path_buf()
+        }
+    });
+
+    let Some(folder) = folder else {
+        return Vec::new();
+    };
+
+    // Append each filename to the folder
+    files
+        .iter()
+        .map(|name| {
+            let full_path = folder.join(name);
+            format!("file://{}", full_path.display())
+        })
+        .collect()
 }
 
 /// Convert D-Bus filters to IPC filters
@@ -199,6 +240,7 @@ impl FileChooserHandler for TtyFileChooser {
             current_folder: options
                 .current_folder()
                 .map(|b| String::from_utf8_lossy(b).into_owned()),
+            files: Vec::new(),
             filters: convert_filters(options.filters()),
             current_filter: None,
         };
@@ -226,6 +268,7 @@ impl FileChooserHandler for TtyFileChooser {
             current_folder: options
                 .current_folder()
                 .map(|b| String::from_utf8_lossy(b).into_owned()),
+            files: Vec::new(),
             filters: convert_filters(options.filters()),
             current_filter: None,
         };
@@ -242,7 +285,22 @@ impl FileChooserHandler for TtyFileChooser {
         title: String,
         options: SaveFilesOptions,
     ) -> Result<FileChooserResult, FileChooserError> {
-        info!("SaveFiles request");
+        // Extract filenames from the files option (nul-terminated byte arrays)
+        let files: Vec<String> = options
+            .files()
+            .iter()
+            .map(|f| {
+                // Remove trailing nul byte if present
+                let bytes = if f.last() == Some(&0) {
+                    &f[..f.len() - 1]
+                } else {
+                    f.as_slice()
+                };
+                String::from_utf8_lossy(bytes).into_owned()
+            })
+            .collect();
+
+        info!(?files, "SaveFiles request");
 
         let session_options = SessionOptions {
             title,
@@ -253,6 +311,7 @@ impl FileChooserHandler for TtyFileChooser {
             current_folder: options
                 .current_folder()
                 .map(|b| String::from_utf8_lossy(b).into_owned()),
+            files,
             filters: Vec::new(),
             current_filter: None,
         };

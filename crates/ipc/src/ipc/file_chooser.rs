@@ -21,6 +21,11 @@ pub struct SessionOptions {
     /// Current folder path
     pub current_folder: Option<String>,
 
+    /// Proposed filenames for SaveFiles (empty for other operations)
+    /// When non-empty, indicates SaveFiles mode where user picks a folder
+    /// and these filenames are appended to create the final URIs
+    pub files: Vec<String>,
+
     /// File filters
     pub filters: Vec<Filter>,
 

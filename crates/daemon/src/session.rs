@@ -5,10 +5,11 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-use portty_ipc::ipc::file_chooser::SessionOptions;
+use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SessionOptions};
 use portty_ipc::ipc::{read_message, write_message};
 use portty_ipc::queue::QueuedCommand;
 use portty_ipc::{SessionRequest, SessionResponse};
+use tracing::warn;
 
 /// Default command shims for each portal type
 /// Returns (shim_name, portty_subcommand) pairs
@@ -75,14 +76,19 @@ pub struct Session {
     /// Selected URIs (HashSet for O(1) lookups and automatic deduplication)
     selection: HashSet<String>,
     created: u64,
+    /// If true, selection is limited to 1 item (for SaveFile)
+    single_select: bool,
 }
 
 impl Session {
     /// Create a new session with its directory
+    ///
+    /// If `single_select` is true, selection is limited to 1 item (for SaveFile).
     pub fn new(
         portal: &str,
         options: SessionOptions,
         custom_bins: &HashMap<String, String>,
+        single_select: bool,
     ) -> std::io::Result<Self> {
         let id = SessionId::new();
         let dir = session_dir(&id);
@@ -132,6 +138,21 @@ impl Session {
             .unwrap_or_default()
             .as_secs();
 
+        // Pre-populate selection based on options
+        let mut selection = HashSet::new();
+        if let Some(ref folder) = options.current_folder
+            && options.save_mode
+        {
+            if !options.files.is_empty() {
+                // SaveFiles: pre-select the folder
+                selection.insert(format!("file://{}", folder));
+            } else if let Some(ref name) = options.current_name {
+                // SaveFile: pre-select folder/name
+                let path = Path::new(folder).join(name);
+                selection.insert(format!("file://{}", path.display()));
+            }
+        }
+
         Ok(Self {
             id,
             dir,
@@ -139,8 +160,9 @@ impl Session {
             child: None,
             listener: Some(listener),
             options,
-            selection: HashSet::new(),
+            selection,
             created,
+            single_select,
         })
     }
 
@@ -320,8 +342,28 @@ impl Session {
                 Response::Selection(self.selection.iter().cloned().collect())
             }
             Request::Select(uris) => {
-                // HashSet handles deduplication automatically
-                self.selection.extend(uris);
+                // Check filters and warn if selection doesn't match
+                if !self.options.filters.is_empty() {
+                    for uri in &uris {
+                        if !matches_any_filter(uri, &self.options.filters) {
+                            warn!(
+                                uri,
+                                "Selection does not match any filter (allowed but may not be intended)"
+                            );
+                        }
+                    }
+                }
+
+                if self.single_select {
+                    // SaveFile: keep only the last selected item
+                    self.selection.clear();
+                    if let Some(uri) = uris.into_iter().last() {
+                        self.selection.insert(uri);
+                    }
+                } else {
+                    // HashSet handles deduplication automatically
+                    self.selection.extend(uris);
+                }
                 Response::Ok
             }
             Request::Deselect(uris) => {
@@ -387,4 +429,84 @@ pub fn base_dir() -> PathBuf {
 /// Get directory for a specific session
 fn session_dir(id: &SessionId) -> PathBuf {
     base_dir().join(id.as_str())
+}
+
+/// Check if a URI matches any of the provided filters
+fn matches_any_filter(uri: &str, filters: &[Filter]) -> bool {
+    // If no filters, everything matches
+    if filters.is_empty() {
+        return true;
+    }
+
+    // Extract filename from URI
+    let path = uri.strip_prefix("file://").unwrap_or(uri);
+    let filename = Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    // Check if any filter matches
+    for filter in filters {
+        for pattern in &filter.patterns {
+            match pattern {
+                FilterPattern::Glob(glob) => {
+                    if glob_matches(glob, filename) {
+                        return true;
+                    }
+                }
+                FilterPattern::MimeType(_mime) => {
+                    // TODO: implement mime type matching
+                    // For now, skip mime type filters
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Simple glob pattern matching (supports * and ?)
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.to_lowercase();
+    let text = text.to_lowercase();
+
+    let mut p_chars = pattern.chars().peekable();
+    let mut t_chars = text.chars().peekable();
+
+    while let Some(pc) = p_chars.next() {
+        match pc {
+            '*' => {
+                // * matches zero or more characters
+                if p_chars.peek().is_none() {
+                    // Trailing * matches everything
+                    return true;
+                }
+                // Try matching rest of pattern at each position
+                let rest_pattern: String = p_chars.collect();
+                let mut remaining: String = t_chars.collect();
+                while !remaining.is_empty() {
+                    if glob_matches(&rest_pattern, &remaining) {
+                        return true;
+                    }
+                    remaining = remaining.chars().skip(1).collect();
+                }
+                return glob_matches(&rest_pattern, "");
+            }
+            '?' => {
+                // ? matches exactly one character
+                if t_chars.next().is_none() {
+                    return false;
+                }
+            }
+            c => {
+                // Literal character match
+                if t_chars.next() != Some(c) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    // Pattern consumed, text should also be consumed
+    t_chars.next().is_none()
 }
