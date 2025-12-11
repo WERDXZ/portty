@@ -12,7 +12,7 @@ pub struct PortalConfig {
     pub exec: Option<String>,
 
     /// Custom bin shims for this portal
-    /// e.g. { "pick" = "fzf --multi | select --stdin" }
+    /// e.g. { "pick" = "fzf --multi | portty select --stdin" }
     #[serde(default)]
     pub bin: HashMap<String, String>,
 }
@@ -45,10 +45,6 @@ fn detect_terminal() -> Option<String> {
 /// Main configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    /// Path to the ptt-builtin binary
-    #[serde(default = "default_builtin_path")]
-    pub builtin_path: String,
-
     /// Default configuration for all portals
     #[serde(default)]
     pub default: PortalConfig,
@@ -62,24 +58,9 @@ pub struct Config {
     pub screenshot: PortalConfig,
 }
 
-fn default_builtin_path() -> String {
-    // Try to find portty-builtin next to the current executable first
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join("portty-builtin");
-            if sibling.exists() {
-                return sibling.to_string_lossy().into_owned();
-            }
-        }
-    }
-    // Fall back to system path
-    "/usr/lib/portty/portty-builtin".to_string()
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
-            builtin_path: default_builtin_path(),
             default: PortalConfig {
                 exec: detect_terminal(),
                 bin: HashMap::new(),

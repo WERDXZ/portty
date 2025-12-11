@@ -2,12 +2,12 @@
 //!
 //! Queue is owned by daemon, CLI interacts via IPC.
 
-use serde::{Deserialize, Serialize};
+use bincode::{Decode, Encode};
 
 use crate::PortalType;
 
 /// A command that can be queued
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub enum QueuedCommand {
     Select(Vec<String>),
     Deselect(Vec<String>),
@@ -15,7 +15,7 @@ pub enum QueuedCommand {
 }
 
 /// A complete submission ready to be applied to a session
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct Submission {
     /// Commands to execute
     pub commands: Vec<QueuedCommand>,
@@ -26,7 +26,7 @@ pub struct Submission {
 }
 
 /// The submission queue (owned by daemon)
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct SubmissionQueue {
     /// Pending commands not yet submitted
     pub pending: Vec<QueuedCommand>,
@@ -68,7 +68,7 @@ impl SubmissionQueue {
     pub fn pop_for_portal(&mut self, portal: PortalType) -> Option<Submission> {
         // Find first matching submission (None matches any portal)
         let idx = self.submissions.iter().position(|s| {
-            s.portal.map_or(true, |p| p == portal)
+            s.portal.is_none_or(|p| p == portal)
         })?;
 
         Some(self.submissions.remove(idx))

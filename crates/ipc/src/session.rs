@@ -2,11 +2,14 @@
 //!
 //! All portal sessions share Submit and Cancel commands.
 //! Portal-specific commands are wrapped in the Portal variant.
+//!
+//! NOTE: This module is currently unused - the unified protocol in
+//! `protocol.rs` supersedes this.
 
-use serde::{Deserialize, Serialize};
+use bincode::{Decode, Encode};
 
 /// Generic session request with shared commands
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub enum Request<P> {
     /// Submit/confirm the selection and close the session
     Submit,
@@ -17,7 +20,7 @@ pub enum Request<P> {
 }
 
 /// Generic session response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub enum Response<R> {
     /// Operation succeeded
     Ok,

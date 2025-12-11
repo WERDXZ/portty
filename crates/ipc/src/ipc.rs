@@ -1,10 +1,13 @@
 pub mod file_chooser;
 
-use serde::{Deserialize, Serialize};
+use bincode::{Decode, Encode};
 use std::io::{Read, Write};
 
+/// Bincode configuration
+const CONFIG: bincode::config::Configuration = bincode::config::standard();
+
 /// Read a bincode message from a reader
-pub fn read_message<T: for<'de> Deserialize<'de>>(reader: &mut impl Read) -> Result<T, IpcError> {
+pub fn read_message<T: Decode<()>>(reader: &mut impl Read) -> Result<T, IpcError> {
     // Read length prefix (u32)
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf)?;
@@ -14,12 +17,13 @@ pub fn read_message<T: for<'de> Deserialize<'de>>(reader: &mut impl Read) -> Res
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
 
-    bincode::deserialize(&buf).map_err(IpcError::Decode)
+    let (msg, _) = bincode::decode_from_slice(&buf, CONFIG).map_err(IpcError::Decode)?;
+    Ok(msg)
 }
 
 /// Write a bincode message to a writer
-pub fn write_message<T: Serialize>(writer: &mut impl Write, msg: &T) -> Result<(), IpcError> {
-    let buf = bincode::serialize(msg).map_err(IpcError::Encode)?;
+pub fn write_message<T: Encode>(writer: &mut impl Write, msg: &T) -> Result<(), IpcError> {
+    let buf = bincode::encode_to_vec(msg, CONFIG).map_err(IpcError::Encode)?;
     let len = buf.len() as u32;
 
     writer.write_all(&len.to_le_bytes())?;
@@ -32,8 +36,8 @@ pub fn write_message<T: Serialize>(writer: &mut impl Write, msg: &T) -> Result<(
 #[derive(Debug)]
 pub enum IpcError {
     Io(std::io::Error),
-    Encode(bincode::Error),
-    Decode(bincode::Error),
+    Encode(bincode::error::EncodeError),
+    Decode(bincode::error::DecodeError),
 }
 
 impl From<std::io::Error> for IpcError {

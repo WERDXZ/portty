@@ -10,11 +10,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-use portty_ipc::daemon::{DaemonRequest, DaemonResponse, QueueStatusInfo, SessionInfo};
-use portty_ipc::ipc::file_chooser::{Request as SessionRequest, Response as SessionResponse};
 use portty_ipc::ipc::{read_message, write_message};
 use portty_ipc::queue::{QueuedCommand, SubmissionQueue};
-use portty_ipc::PortalType;
+use portty_ipc::{
+    DaemonExtension, DaemonRequest, DaemonResponse, DaemonResponseExtension, PortalType,
+    QueueStatusInfo, Request, Response, SessionInfo, SessionRequest, SessionResponse,
+};
 use tracing::{debug, info, warn};
 
 use crate::session::base_dir;
@@ -157,7 +158,74 @@ fn handle_connection(
 
 fn handle_request(req: DaemonRequest, state: &Arc<RwLock<DaemonState>>) -> DaemonResponse {
     match req {
-        DaemonRequest::ListSessions => {
+        // === Base commands: route to active session or queue ===
+        Request::Select(uris) => {
+            route_session_command(state, Request::Select(uris))
+        }
+        Request::Deselect(uris) => {
+            route_session_command(state, Request::Deselect(uris))
+        }
+        Request::Clear => {
+            route_session_command(state, Request::Clear)
+        }
+        Request::Submit => {
+            route_session_command(state, Request::Submit)
+        }
+        Request::Cancel => {
+            route_session_command(state, Request::Cancel)
+        }
+        Request::GetOptions => {
+            route_session_command(state, Request::GetOptions)
+        }
+        Request::GetSelection => {
+            route_session_command(state, Request::GetSelection)
+        }
+
+        // === Daemon-specific extensions ===
+        Request::Extended(ext) => handle_daemon_extension(ext, state),
+    }
+}
+
+/// Route a session command to the active session
+fn route_session_command(
+    state: &Arc<RwLock<DaemonState>>,
+    req: SessionRequest,
+) -> DaemonResponse {
+    let st = state.read().unwrap();
+
+    // Auto-select session
+    let session = if st.sessions.len() == 1 {
+        st.sessions.iter().next().cloned()
+    } else if st.sessions.is_empty() {
+        return Response::Error("No active sessions".to_string());
+    } else {
+        return Response::Error(format!(
+            "Multiple sessions active ({}), specify --session",
+            st.sessions.len()
+        ));
+    };
+
+    let session = match session {
+        Some(s) => s,
+        None => return Response::Error("No active sessions".to_string()),
+    };
+
+    drop(st); // Release lock before socket operations
+
+    // Forward to session
+    match send_to_session(&session.socket_path, &req) {
+        Ok(resp) => resp.into(), // Convert SessionResponse to DaemonResponse
+        Err(e) => Response::Error(e),
+    }
+}
+
+/// Handle daemon-specific extension commands
+fn handle_daemon_extension(
+    ext: DaemonExtension,
+    state: &Arc<RwLock<DaemonState>>,
+) -> DaemonResponse {
+    match ext {
+        DaemonExtension::ListSessions => {
             let st = state.read().unwrap();
             let sessions = st
                 .sessions
@@ -170,72 +238,38 @@ fn handle_request(req: DaemonRequest, state: &Arc<RwLock<DaemonState>>) -> Daemo
                     socket_path: s.socket_path.to_string_lossy().into_owned(),
                 })
                 .collect();
-            DaemonResponse::Sessions(sessions)
+            Response::Extended(DaemonResponseExtension::Sessions(sessions))
         }
 
-        DaemonRequest::GetSession(id) => {
+        DaemonExtension::GetSession(id) => {
             let st = state.read().unwrap();
             match st.sessions.get(&id) {
-                Some(s) => DaemonResponse::Session(SessionInfo {
+                Some(s) => Response::Extended(DaemonResponseExtension::Session(SessionInfo {
                     id: s.id.clone(),
                     portal: s.portal,
                     title: s.title.clone(),
                     created: s.created,
                     socket_path: s.socket_path.to_string_lossy().into_owned(),
-                }),
-                None => DaemonResponse::Error(format!("Session not found: {id}")),
+                })),
+                None => Response::Error(format!("Session not found: {id}")),
             }
         }
 
-        DaemonRequest::SessionCommand { session, command: _ } => {
-            // Return session info with socket path - CLI connects directly
-            let st = state.read().unwrap();
-
-            let target = match session {
-                Some(id) => st.sessions.get(&id).cloned(),
-                None => {
-                    // Auto-select: use only session if exactly one exists
-                    if st.sessions.len() == 1 {
-                        st.sessions.iter().next().cloned()
-                    } else if st.sessions.is_empty() {
-                        return DaemonResponse::Error("No active sessions".to_string());
-                    } else {
-                        return DaemonResponse::Error(format!(
-                            "Multiple sessions active ({}), specify --session",
-                            st.sessions.len()
-                        ));
-                    }
-                }
-            };
-
-            match target {
-                Some(s) => DaemonResponse::Session(SessionInfo {
-                    id: s.id.clone(),
-                    portal: s.portal,
-                    title: s.title.clone(),
-                    created: s.created,
-                    socket_path: s.socket_path.to_string_lossy().into_owned(),
-                }),
-                None => DaemonResponse::Error("Session not found".to_string()),
-            }
-        }
-
-        // Queue operations
-        DaemonRequest::QueuePush(cmd) => {
+        DaemonExtension::QueuePush(cmd) => {
             let mut st = state.write().unwrap();
             st.queue.push_command(cmd);
-            DaemonResponse::Ok
+            Response::Ok
         }
 
-        DaemonRequest::QueueSubmit { portal } => {
+        DaemonExtension::QueueSubmit { portal } => {
             let mut st = state.write().unwrap();
             if st.queue.pending.is_empty() {
-                return DaemonResponse::Error("No pending commands to submit".to_string());
+                return Response::Error("No pending commands to submit".to_string());
             }
 
             // Find active session matching portal type
             let matching_session = st.sessions.iter().find(|s| {
-                portal.map_or(true, |p| s.portal == p)
+                portal.is_none_or(|p| s.portal == p)
             }).cloned();
 
             if let Some(session) = matching_session {
@@ -250,7 +284,7 @@ fn handle_request(req: DaemonRequest, state: &Arc<RwLock<DaemonState>>) -> Daemo
                             commands = pending.len(),
                             "Applied queued commands to active session"
                         );
-                        DaemonResponse::Ok
+                        Response::Ok
                     }
                     Err(e) => {
                         // Failed to apply - restore pending and queue for later
@@ -258,36 +292,36 @@ fn handle_request(req: DaemonRequest, state: &Arc<RwLock<DaemonState>>) -> Daemo
                         let mut st = state.write().unwrap();
                         st.queue.pending = pending;
                         st.queue.submit(portal);
-                        DaemonResponse::Ok
+                        Response::Ok
                     }
                 }
             } else {
                 // No active session - queue for later
                 st.queue.submit(portal);
-                DaemonResponse::Ok
+                Response::Ok
             }
         }
 
-        DaemonRequest::QueueClearPending => {
+        DaemonExtension::QueueClearPending => {
             let mut st = state.write().unwrap();
             st.queue.clear_pending();
-            DaemonResponse::Ok
+            Response::Ok
         }
 
-        DaemonRequest::QueueClearAll => {
+        DaemonExtension::QueueClearAll => {
             let mut st = state.write().unwrap();
             st.queue.clear_all();
-            DaemonResponse::Ok
+            Response::Ok
         }
 
-        DaemonRequest::QueueStatus => {
+        DaemonExtension::QueueStatus => {
             let st = state.read().unwrap();
-            DaemonResponse::QueueStatus(QueueStatusInfo {
+            Response::Extended(DaemonResponseExtension::QueueStatus(QueueStatusInfo {
                 pending_count: st.queue.pending.len(),
                 pending: st.queue.pending.clone(),
                 submissions_count: st.queue.submissions.len(),
                 submissions: st.queue.submissions.clone(),
-            })
+            }))
         }
     }
 }
@@ -296,25 +330,25 @@ fn handle_request(req: DaemonRequest, state: &Arc<RwLock<DaemonState>>) -> Daemo
 fn apply_to_session(socket_path: &PathBuf, commands: &[QueuedCommand]) -> Result<(), String> {
     // Send each command
     for cmd in commands {
-        let req = match cmd {
-            QueuedCommand::Select(uris) => SessionRequest::Select(uris.clone()),
-            QueuedCommand::Deselect(uris) => SessionRequest::Deselect(uris.clone()),
-            QueuedCommand::Clear => SessionRequest::Clear,
+        let req: SessionRequest = match cmd {
+            QueuedCommand::Select(uris) => Request::Select(uris.clone()),
+            QueuedCommand::Deselect(uris) => Request::Deselect(uris.clone()),
+            QueuedCommand::Clear => Request::Clear,
         };
 
         let resp = send_to_session(socket_path, &req)?;
         match resp {
-            SessionResponse::Ok => {}
-            SessionResponse::Error(e) => return Err(e),
+            Response::Ok => {}
+            Response::Error(e) => return Err(e),
             _ => return Err("Unexpected response".to_string()),
         }
     }
 
     // Send submit
-    let resp = send_to_session(socket_path, &SessionRequest::Submit)?;
+    let resp = send_to_session(socket_path, &Request::Submit)?;
     match resp {
-        SessionResponse::Ok => Ok(()),
-        SessionResponse::Error(e) => Err(e),
+        Response::Ok => Ok(()),
+        Response::Error(e) => Err(e),
         _ => Err("Unexpected response".to_string()),
     }
 }

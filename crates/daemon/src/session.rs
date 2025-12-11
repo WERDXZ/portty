@@ -5,11 +5,12 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 
-use portty_ipc::ipc::file_chooser::{Request, Response, SessionOptions};
+use portty_ipc::ipc::file_chooser::SessionOptions;
 use portty_ipc::ipc::{read_message, write_message};
+use portty_ipc::{SessionRequest, SessionResponse};
 
-/// Default commands for each portal type
-/// Returns (shim_name, internal_command) pairs
+/// Default command shims for each portal type
+/// Returns (shim_name, portty_subcommand) pairs
 fn default_commands(portal: &str) -> &'static [(&'static str, &'static str)] {
     match portal {
         // "sel" shim avoids conflict with POSIX `select` builtin
@@ -59,7 +60,6 @@ impl Session {
     pub fn new(
         portal: &str,
         options: SessionOptions,
-        builtin_path: &str,
         custom_bins: &HashMap<String, String>,
     ) -> std::io::Result<Self> {
         let id = SessionId::new();
@@ -75,16 +75,17 @@ impl Session {
         let bin_dir = dir.join("bin");
         fs::create_dir_all(&bin_dir)?;
 
-        // Create default command shims
-        for (shim_name, internal_cmd) in default_commands(portal) {
+        // Create default command shims (call portty CLI)
+        for (shim_name, subcommand) in default_commands(portal) {
             // Skip if overridden by custom bin
             if custom_bins.contains_key(*shim_name) {
                 continue;
             }
             let shim_path = bin_dir.join(shim_name);
+            // portty auto-detects session mode via PORTTY_SOCK env var
             let shim_content = format!(
-                "#!/bin/sh\nexec \"{}\" \"{}\" \"{}\" \"$@\"\n",
-                builtin_path, portal, internal_cmd
+                "#!/bin/sh\nexec portty {} \"$@\"\n",
+                subcommand
             );
             fs::write(&shim_path, shim_content)?;
             fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))?;
@@ -188,7 +189,7 @@ impl Session {
     /// In headless mode (no child): waits for explicit Submit/Cancel via IPC
     pub fn run(&mut self) -> std::io::Result<SessionResult> {
         let listener = self.listener.take().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "no listener")
+            std::io::Error::other("no listener")
         })?;
 
         // Set socket to non-blocking for polling
@@ -224,7 +225,7 @@ impl Session {
                     stream.set_nonblocking(false)?;
 
                     // Handle request
-                    match read_message::<Request>(&mut stream) {
+                    match read_message::<SessionRequest>(&mut stream) {
                         Ok(req) => {
                             let resp = self.handle_request(req, &mut cancelled, &mut submitted);
                             let _ = write_message(&mut stream, &resp);
@@ -261,10 +262,12 @@ impl Session {
 
     fn handle_request(
         &mut self,
-        req: Request,
+        req: SessionRequest,
         cancelled: &mut bool,
         submitted: &mut bool,
-    ) -> Response {
+    ) -> SessionResponse {
+        use portty_ipc::{Request, Response};
+
         match req {
             Request::GetOptions => Response::Options(self.options.clone()),
             Request::GetSelection => Response::Selection(self.selection.clone()),
@@ -302,6 +305,8 @@ impl Session {
                 }
                 Response::Ok
             }
+            // NoExtension is uninhabited - this arm is unreachable
+            Request::Extended(never) => match never {},
         }
     }
 

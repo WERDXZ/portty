@@ -91,7 +91,6 @@ impl TtyFileChooser {
         let mut session = Session::new(
             portal_str,
             options,
-            &self.config.builtin_path,
             &portal_config.bin,
         )
         .map_err(|e| FileChooserError::Other(format!("failed to create session: {e}")))?;
