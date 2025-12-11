@@ -692,9 +692,11 @@ dependencies = [
 name = "portty"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "clap",
  "percent-encoding",
  "portty-ipc",
+ "serde",
 ]
 
 [[package]]

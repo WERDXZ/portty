@@ -4,9 +4,11 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+
 use portty_ipc::daemon::{DaemonRequest, DaemonResponse, SessionInfo};
 use portty_ipc::ipc::file_chooser::{Request as SessionRequest, Response as SessionResponse};
 use portty_ipc::ipc::{read_message, write_message};
+use portty_ipc::queue::{self, QueuedCommand};
 
 /// Portty - interact with XDG portal sessions from the command line
 #[derive(Parser)]
@@ -16,9 +18,17 @@ struct Cli {
     #[arg(short, long, global = true)]
     session: Option<String>,
 
+    /// Execute immediately instead of queueing
+    #[arg(short, long, global = true)]
+    immediate: bool,
+
     /// List active sessions
     #[arg(long)]
     list: bool,
+
+    /// Show queued commands and submissions
+    #[arg(long)]
+    queue: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -45,10 +55,14 @@ enum Command {
     /// Clear all selection
     Clear,
 
-    /// Submit/confirm the selection
-    Submit,
+    /// Bundle pending commands into a submission
+    Submit {
+        /// Target portal type (default: any)
+        #[arg(long)]
+        portal: Option<String>,
+    },
 
-    /// Cancel the operation
+    /// Cancel - clear pending commands
     Cancel,
 }
 
@@ -59,11 +73,21 @@ fn main() -> ExitCode {
         return cmd_list();
     }
 
+    if cli.queue {
+        return cmd_show_queue();
+    }
+
     match cli.command {
-        Some(cmd) => run_command(cli.session, cmd),
+        Some(cmd) => {
+            if cli.immediate {
+                run_immediate(cli.session, cmd)
+            } else {
+                run_queued(cmd)
+            }
+        }
         None => {
-            // No command - show current selection
-            run_command(cli.session, Command::Select { files: vec![], stdin: false })
+            // No command - show current selection from session
+            run_immediate(cli.session, Command::Select { files: vec![], stdin: false })
         }
     }
 }
@@ -138,11 +162,72 @@ fn cmd_list() -> ExitCode {
     }
 }
 
+/// Show queued commands and submissions
+fn cmd_show_queue() -> ExitCode {
+    let q = queue::read_queue();
+
+    if q.pending.is_empty() && q.submissions.is_empty() {
+        println!("Queue is empty");
+        return ExitCode::SUCCESS;
+    }
+
+    if !q.pending.is_empty() {
+        println!("Pending commands ({}):", q.pending.len());
+        for (i, cmd) in q.pending.iter().enumerate() {
+            print_command(i + 1, cmd, "  ");
+        }
+    }
+
+    if !q.submissions.is_empty() {
+        println!("Submissions ({}):", q.submissions.len());
+        for (i, sub) in q.submissions.iter().enumerate() {
+            let portal = sub.portal.as_deref().unwrap_or("any");
+            println!("  {}. [{}] {} command(s)", i + 1, portal, sub.commands.len());
+            for cmd in &sub.commands {
+                print_command(0, cmd, "       ");
+            }
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
+fn print_command(num: usize, cmd: &QueuedCommand, indent: &str) {
+    match cmd {
+        QueuedCommand::Select(uris) => {
+            if num > 0 {
+                println!("{}{}. select {} file(s)", indent, num, uris.len());
+            } else {
+                println!("{}select {} file(s)", indent, uris.len());
+            }
+            for uri in uris {
+                println!("{}  {uri}", indent);
+            }
+        }
+        QueuedCommand::Deselect(uris) => {
+            if num > 0 {
+                println!("{}{}. deselect {} file(s)", indent, num, uris.len());
+            } else {
+                println!("{}deselect {} file(s)", indent, uris.len());
+            }
+            for uri in uris {
+                println!("{}  {uri}", indent);
+            }
+        }
+        QueuedCommand::Clear => {
+            if num > 0 {
+                println!("{}{}. clear", indent, num);
+            } else {
+                println!("{}clear", indent);
+            }
+        }
+    }
+}
+
 /// Get session info (auto-select or by ID)
 fn get_session(session_id: Option<String>) -> Result<SessionInfo, String> {
     match session_id {
         Some(id) => {
-            // Get specific session by ID
             match send_daemon_request(&DaemonRequest::GetSession(id))? {
                 DaemonResponse::Session(info) => Ok(info),
                 DaemonResponse::Error(e) => Err(e),
@@ -150,7 +235,6 @@ fn get_session(session_id: Option<String>) -> Result<SessionInfo, String> {
             }
         }
         None => {
-            // Auto-select: list sessions and pick if exactly one
             match send_daemon_request(&DaemonRequest::ListSessions)? {
                 DaemonResponse::Sessions(sessions) => {
                     if sessions.is_empty() {
@@ -158,10 +242,16 @@ fn get_session(session_id: Option<String>) -> Result<SessionInfo, String> {
                     } else if sessions.len() == 1 {
                         Ok(sessions.into_iter().next().unwrap())
                     } else {
-                        Err(format!(
-                            "Multiple sessions active ({}), specify --session",
-                            sessions.len()
-                        ))
+                        eprintln!("Multiple sessions active, choose with --session:");
+                        for s in &sessions {
+                            eprintln!(
+                                "  {} [{}] {}",
+                                s.id,
+                                s.portal,
+                                s.title.as_deref().unwrap_or("")
+                            );
+                        }
+                        Err("Multiple sessions active".to_string())
                     }
                 }
                 DaemonResponse::Error(e) => Err(e),
@@ -185,7 +275,6 @@ const PATH_ENCODE_SET: &AsciiSet = &CONTROLS
 
 /// Convert path to file:// URI
 fn to_uri(arg: &str) -> Result<String, String> {
-    // Already a URI
     if arg.starts_with("file://") || arg.starts_with("http://") || arg.starts_with("https://") {
         return Ok(arg.to_string());
     }
@@ -203,34 +292,29 @@ fn to_uri(arg: &str) -> Result<String, String> {
     Ok(format!("file://{}", encoded))
 }
 
-/// Run a command on a session
-fn run_command(session_id: Option<String>, cmd: Command) -> ExitCode {
-    // Get session info from daemon
-    let session = match get_session(session_id) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            return ExitCode::from(1);
-        }
-    };
+/// Parse files to URIs
+fn parse_files(files: &[String], stdin: bool) -> Result<Vec<String>, String> {
+    if stdin {
+        use std::io::BufRead;
+        std::io::stdin()
+            .lock()
+            .lines()
+            .map_while(Result::ok)
+            .filter(|l| !l.is_empty())
+            .map(|l| to_uri(&l))
+            .collect()
+    } else {
+        files.iter().map(|f| to_uri(f)).collect()
+    }
+}
 
-    // Build session request based on command
-    let req = match cmd {
+/// Run command in queued mode
+fn run_queued(cmd: Command) -> ExitCode {
+    let mut q = queue::read_queue();
+
+    match cmd {
         Command::Select { files, stdin } => {
-            let uris: Result<Vec<String>, String> = if stdin {
-                use std::io::BufRead;
-                std::io::stdin()
-                    .lock()
-                    .lines()
-                    .map_while(Result::ok)
-                    .filter(|l| !l.is_empty())
-                    .map(|l| to_uri(&l))
-                    .collect()
-            } else {
-                files.iter().map(|f| to_uri(f)).collect()
-            };
-
-            let uris = match uris {
+            let uris = match parse_files(&files, stdin) {
                 Ok(u) => u,
                 Err(e) => {
                     eprintln!("Error: {e}");
@@ -239,15 +323,112 @@ fn run_command(session_id: Option<String>, cmd: Command) -> ExitCode {
             };
 
             if uris.is_empty() {
-                // Show current selection
+                // Show current selection - needs immediate mode
+                return run_immediate(None, Command::Select { files: vec![], stdin: false });
+            }
+
+            q.push_command(QueuedCommand::Select(uris));
+            if let Err(e) = queue::write_queue(&q) {
+                eprintln!("Error: {e}");
+                return ExitCode::from(1);
+            }
+            println!("Queued select ({} pending)", q.pending.len());
+            ExitCode::SUCCESS
+        }
+
+        Command::Deselect { files } => {
+            let uris = match parse_files(&files, false) {
+                Ok(u) => u,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+
+            q.push_command(QueuedCommand::Deselect(uris));
+            if let Err(e) = queue::write_queue(&q) {
+                eprintln!("Error: {e}");
+                return ExitCode::from(1);
+            }
+            println!("Queued deselect ({} pending)", q.pending.len());
+            ExitCode::SUCCESS
+        }
+
+        Command::Clear => {
+            q.push_command(QueuedCommand::Clear);
+            if let Err(e) = queue::write_queue(&q) {
+                eprintln!("Error: {e}");
+                return ExitCode::from(1);
+            }
+            println!("Queued clear ({} pending)", q.pending.len());
+            ExitCode::SUCCESS
+        }
+
+        Command::Submit { portal } => {
+            if q.pending.is_empty() {
+                println!("No pending commands to submit");
+                return ExitCode::SUCCESS;
+            }
+
+            let count = q.pending.len();
+            q.submit(portal.clone());
+            if let Err(e) = queue::write_queue(&q) {
+                eprintln!("Error: {e}");
+                return ExitCode::from(1);
+            }
+
+            let portal_str = portal.as_deref().unwrap_or("any");
+            println!("Created submission with {} command(s) for [{}]", count, portal_str);
+            println!("{} submission(s) waiting", q.submissions.len());
+            ExitCode::SUCCESS
+        }
+
+        Command::Cancel => {
+            let pending_count = q.pending.len();
+            q.clear_pending();
+            if let Err(e) = queue::write_queue(&q) {
+                eprintln!("Error: {e}");
+                return ExitCode::from(1);
+            }
+
+            if pending_count > 0 {
+                println!("Cleared {} pending command(s)", pending_count);
+            } else {
+                println!("No pending commands");
+            }
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+/// Run command immediately (bypass queue)
+fn run_immediate(session_id: Option<String>, cmd: Command) -> ExitCode {
+    let session = match get_session(session_id) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let req = match cmd {
+        Command::Select { files, stdin } => {
+            let uris = match parse_files(&files, stdin) {
+                Ok(u) => u,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+
+            if uris.is_empty() {
                 SessionRequest::GetSelection
             } else {
                 SessionRequest::Select(uris)
             }
         }
         Command::Deselect { files } => {
-            let uris: Result<Vec<String>, String> = files.iter().map(|f| to_uri(f)).collect();
-            let uris = match uris {
+            let uris = match parse_files(&files, false) {
                 Ok(u) => u,
                 Err(e) => {
                     eprintln!("Error: {e}");
@@ -257,11 +438,10 @@ fn run_command(session_id: Option<String>, cmd: Command) -> ExitCode {
             SessionRequest::Deselect(uris)
         }
         Command::Clear => SessionRequest::Clear,
-        Command::Submit => SessionRequest::Submit,
+        Command::Submit { .. } => SessionRequest::Submit,
         Command::Cancel => SessionRequest::Cancel,
     };
 
-    // Send to session socket
     match send_session_request(&session.socket_path, &req) {
         Ok(SessionResponse::Ok) => ExitCode::SUCCESS,
         Ok(SessionResponse::Selection(uris)) => {

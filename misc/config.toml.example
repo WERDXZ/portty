@@ -21,6 +21,19 @@ exec = "foot"
 #   1. Browser opens file dialog
 #   2. Run: portty select /path/to/file.txt
 #   3. Run: portty submit
+#
+# Submission queue:
+#   Pre-queue file selections before dialogs open:
+#     portty select file1.txt file2.txt   # Add to pending
+#     portty select file3.txt             # Add more
+#     portty submit                       # Bundle into submission
+#
+#   When a dialog opens, queued submissions are auto-applied.
+#   Use --queue to view pending/submissions:
+#     portty --queue
+#
+#   Use --immediate (-i) for direct execution to active session:
+#     portty -i select file.txt
 
 # Custom commands available in the session
 # These are added to $PATH alongside the default builtins (sel, submit, cancel)

@@ -10,6 +10,7 @@ use portty_ipc::portal::file_chooser::{
     FileChooserError, FileChooserHandler, FileChooserResult, FileFilter, OpenFileOptions,
     SaveFileOptions, SaveFilesOptions, FilterPattern as PortalFilterPattern,
 };
+use portty_ipc::queue::{self, QueuedCommand};
 
 /// File chooser handler that spawns terminals
 pub struct TtyFileChooser {
@@ -28,6 +29,48 @@ impl TtyFileChooser {
         portal: &str,
         options: SessionOptions,
     ) -> Result<FileChooserResult, FileChooserError> {
+        // Check for queued submission first
+        let mut q = queue::read_queue();
+        if let Some(submission) = q.pop_for_portal(portal) {
+            info!(
+                portal,
+                commands = submission.commands.len(),
+                "Found queued submission, auto-applying"
+            );
+
+            // Save updated queue
+            let _ = queue::write_queue(&q);
+
+            // Apply queued commands to get URIs
+            let mut selection: Vec<String> = Vec::new();
+            for cmd in submission.commands {
+                match cmd {
+                    QueuedCommand::Select(uris) => {
+                        for uri in uris {
+                            if !selection.contains(&uri) {
+                                selection.push(uri);
+                            }
+                        }
+                    }
+                    QueuedCommand::Deselect(uris) => {
+                        selection.retain(|u| !uris.contains(u));
+                    }
+                    QueuedCommand::Clear => {
+                        selection.clear();
+                    }
+                }
+            }
+
+            if selection.is_empty() {
+                info!("Queued submission resulted in empty selection, cancelling");
+                return Err(FileChooserError::Cancelled);
+            }
+
+            info!(?selection, "Queued submission applied");
+            return Ok(FileChooserResult::new().uris(selection));
+        }
+
+        // No queued submission - run interactive session
         let portal_config = self.config.get_portal_config(portal);
 
         // Get exec command - None means headless mode
