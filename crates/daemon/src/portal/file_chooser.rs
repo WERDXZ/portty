@@ -1,8 +1,10 @@
 use std::sync::{Arc, RwLock};
+use std::thread;
 
+use futures_lite::future::yield_now;
 use tracing::{debug, info, instrument};
 
-use crate::config::Config;
+use crate::config::{Config, FileChooserOp};
 use crate::daemon_socket::{DaemonState, RegisteredSession};
 use crate::session::{Session, SessionResult};
 use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SessionOptions};
@@ -25,17 +27,19 @@ impl TtyFileChooser {
         Self { config, state }
     }
 
-    fn run_session(
+    async fn run_session(
         &self,
-        portal: PortalType,
+        op: FileChooserOp,
         options: SessionOptions,
     ) -> Result<FileChooserResult, FileChooserError> {
+        let portal = PortalType::FileChooser;
+
         // Check for queued submission first
         {
             let mut st = self.state.write().unwrap();
             if let Some(submission) = st.queue.pop_for_portal(portal) {
                 info!(
-                    %portal,
+                    ?op,
                     commands = submission.commands.len(),
                     "Found queued submission, auto-applying"
                 );
@@ -70,30 +74,19 @@ impl TtyFileChooser {
             }
         }
 
-        // No queued submission - run interactive session
-        let portal_str = portal.as_str();
-        let portal_config = self.config.get_portal_config(portal_str);
-
-        // Get exec command - None means headless mode
-        let exec = portal_config
-            .exec
-            .as_deref()
-            .or(self.config.default.exec.as_deref())
-            .filter(|s| !s.is_empty());
+        // Get operation-specific config
+        let exec = self.config.file_chooser_exec(op).map(String::from);
+        let bin = self.config.file_chooser_bin(op);
 
         let headless = exec.is_none();
         if headless {
-            info!(%portal, "Starting headless session (use `portty` CLI to interact)");
+            info!(?op, "Starting headless session (use `portty` CLI to interact)");
         } else {
-            debug!(exec, %portal, "Creating session");
+            debug!(?exec, ?op, "Creating session");
         }
 
-        let mut session = Session::new(
-            portal_str,
-            options,
-            &portal_config.bin,
-        )
-        .map_err(|e| FileChooserError::Other(format!("failed to create session: {e}")))?;
+        let mut session = Session::new(portal.as_str(), options, &bin)
+            .map_err(|e| FileChooserError::Other(format!("failed to create session: {e}")))?;
 
         // Register session and transfer any pending commands
         let session_id = session.id().to_string();
@@ -118,15 +111,27 @@ impl TtyFileChooser {
             }
         }
 
-        // Only spawn terminal in non-headless mode
-        if let Some(exec) = exec {
+        // Spawn process (terminal or auto-confirm command like "submit")
+        if let Some(ref exec) = exec {
             session
-                .spawn(exec, portal_str)
+                .spawn(exec, portal.as_str())
                 .map_err(|e| FileChooserError::Other(format!("failed to spawn: {e}")))?;
         }
 
-        let result = session
-            .run()
+        // Run session in background thread (allows concurrent sessions)
+        let handle = thread::spawn(move || session.run());
+
+        // Poll until thread completes
+        loop {
+            if handle.is_finished() {
+                break;
+            }
+            yield_now().await;
+        }
+
+        let result = handle
+            .join()
+            .map_err(|_| FileChooserError::Other("session thread panicked".to_string()))?
             .map_err(|e| FileChooserError::Other(format!("session failed: {e}")))?;
 
         // Unregister session after completion
@@ -195,10 +200,10 @@ impl FileChooserHandler for TtyFileChooser {
                 .current_folder()
                 .map(|b| String::from_utf8_lossy(b).into_owned()),
             filters: convert_filters(options.filters()),
-            current_filter: None, // TODO: find index
+            current_filter: None,
         };
 
-        self.run_session(PortalType::FileChooser, session_options)
+        self.run_session(FileChooserOp::OpenFile, session_options).await
     }
 
     #[instrument(skip(self, _parent_window, options))]
@@ -225,7 +230,7 @@ impl FileChooserHandler for TtyFileChooser {
             current_filter: None,
         };
 
-        self.run_session(PortalType::FileChooser, session_options)
+        self.run_session(FileChooserOp::SaveFile, session_options).await
     }
 
     #[instrument(skip(self, _parent_window, options))]
@@ -242,7 +247,7 @@ impl FileChooserHandler for TtyFileChooser {
         let session_options = SessionOptions {
             title,
             multiple: true,
-            directory: true, // SaveFiles selects a directory
+            directory: true,
             save_mode: true,
             current_name: None,
             current_folder: options
@@ -252,6 +257,6 @@ impl FileChooserHandler for TtyFileChooser {
             current_filter: None,
         };
 
-        self.run_session(PortalType::FileChooser, session_options)
+        self.run_session(FileChooserOp::SaveFiles, session_options).await
     }
 }

@@ -1,47 +1,48 @@
 # Portty configuration
 # Place this file at ~/.config/portty/config.toml
 
-# Path to the portty-builtin binary (default: /usr/lib/portty/portty-builtin)
-# builtin_path = "/usr/lib/portty/portty-builtin"
-
-# Default terminal command for all portals
-# Set to empty string or omit for headless mode (CLI only)
-[default]
+# Root level = default for all portals
+# Auto-detects terminal if not set (foot, alacritty, kitty, etc.)
 exec = "foot"
 
-# Override for specific portals
+# File chooser portal configuration
 [file-chooser]
-exec = "foot"
+exec = "foot"  # default for all file-chooser operations
 
-# Headless mode example - no terminal, use `portty` CLI only:
-# [file-chooser]
-# exec = ""
-#
-# Usage in headless mode:
-#   1. Browser opens file dialog
-#   2. Run: portty select /path/to/file.txt
-#   3. Run: portty submit
+# Custom commands available in sessions
+# Added to $PATH alongside builtins (sel, submit, cancel)
+[file-chooser.bin]
+pick = "fzf --multi | sel --stdin"
+preview = "bat \"$@\""
+
+# Per-operation overrides
+# Priority: operation-specific → file-chooser → root default
+
+# OpenFile: browse and select files
+[file-chooser.open-file]
+# exec = "foot"  # inherits from [file-chooser]
+
+# SaveFile: auto-confirm with proposed filename
+# Using "submit" shim immediately confirms the save location
+[file-chooser.save-file]
+exec = "submit"
+
+# SaveFiles: auto-confirm with proposed directory
+[file-chooser.save-files]
+exec = "submit"
+
+# Headless mode (no terminal, CLI only):
+#   Set exec = "" at any level
+#   Use `portty` CLI to interact:
+#     portty select /path/to/file.txt
+#     portty submit
 #
 # Submission queue:
-#   Pre-queue file selections before dialogs open:
-#     portty select file1.txt file2.txt   # Add to pending
-#     portty select file3.txt             # Add more
-#     portty submit                       # Bundle into submission
-#
-#   When a dialog opens, queued submissions are auto-applied.
-#   Use --queue to view pending/submissions:
-#     portty --queue
-#
-#   Use --immediate (-i) for direct execution to active session:
-#     portty -i select file.txt
-
-# Custom commands available in the session
-# These are added to $PATH alongside the default builtins (sel, submit, cancel)
-[file-chooser.bin]
-# Quick pick with fzf
-pick = "fzf --multi | sel --stdin"
-# Preview files
-preview = "bat \"$@\""
+#   Pre-queue selections before dialogs open:
+#     portty select file1.txt file2.txt
+#     portty submit
+#   Queued submissions auto-apply when dialog opens.
+#   Use --queue to view: portty --queue
 
 # Future portals:
 # [screenshot]

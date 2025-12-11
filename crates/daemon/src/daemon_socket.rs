@@ -223,23 +223,25 @@ fn handle_request(req: DaemonRequest, state: &Arc<RwLock<DaemonState>>) -> Daemo
 }
 
 /// Route a session command to the active session
+///
+/// When multiple sessions are active, uses the earliest (oldest) session.
+/// This allows concurrent sessions while providing sensible default behavior.
 fn route_session_command(
     state: &Arc<RwLock<DaemonState>>,
     req: SessionRequest,
 ) -> DaemonResponse {
     let st = state.read().unwrap();
 
-    // Auto-select session
-    let session = if st.sessions.len() == 1 {
-        st.sessions.iter().next().cloned()
-    } else if st.sessions.is_empty() {
+    if st.sessions.is_empty() {
         return Response::Error("No active sessions".to_string());
-    } else {
-        return Response::Error(format!(
-            "Multiple sessions active ({}), specify --session",
-            st.sessions.len()
-        ));
-    };
+    }
+
+    // Select earliest session (by creation time)
+    let session = st
+        .sessions
+        .iter()
+        .min_by_key(|s| s.created)
+        .cloned();
 
     let session = match session {
         Some(s) => s,

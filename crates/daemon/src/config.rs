@@ -3,31 +3,69 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-/// Portal-specific configuration
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct PortalConfig {
+/// Portal configuration - extensible via generic parameter
+#[derive(Debug, Clone, Deserialize)]
+pub struct PortalConfig<Ext = ()> {
     /// Command to execute for this portal
-    /// e.g. "foot -e /bin/sh" or "foot -e fzf-picker"
     #[serde(default)]
     pub exec: Option<String>,
 
     /// Custom bin shims for this portal
-    /// e.g. { "pick" = "fzf --multi | portty select --stdin" }
     #[serde(default)]
     pub bin: HashMap<String, String>,
+
+    /// Extension fields (flattened into this table)
+    #[serde(flatten)]
+    pub ext: Ext,
 }
+
+impl<Ext: Default> Default for PortalConfig<Ext> {
+    fn default() -> Self {
+        Self {
+            exec: None,
+            bin: HashMap::new(),
+            ext: Ext::default(),
+        }
+    }
+}
+
+/// File chooser operation types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileChooserOp {
+    OpenFile,
+    SaveFile,
+    SaveFiles,
+}
+
+/// File chooser extension - sub-operation configs
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FileChooserExt {
+    #[serde(default, rename = "open-file")]
+    pub open_file: Option<PortalConfig>,
+
+    #[serde(default, rename = "save-file")]
+    pub save_file: Option<PortalConfig>,
+
+    #[serde(default, rename = "save-files")]
+    pub save_files: Option<PortalConfig>,
+}
+
+/// Root extension - all portal configs
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RootExt {
+    #[serde(default, rename = "file-chooser")]
+    pub file_chooser: Option<PortalConfig<FileChooserExt>>,
+
+    #[serde(default)]
+    pub screenshot: Option<PortalConfig>,
+}
+
+/// Main configuration - just a PortalConfig with RootExt
+pub type Config = PortalConfig<RootExt>;
 
 /// Try to find a terminal emulator
 fn detect_terminal() -> Option<String> {
-    // Check common terminals in order of preference
-    let terminals = [
-        "foot",
-        "alacritty",
-        "kitty",
-        "wezterm",
-        "ghostty",
-        "xterm",
-    ];
+    let terminals = ["foot", "alacritty", "kitty", "wezterm", "ghostty", "xterm"];
 
     for term in terminals {
         if std::process::Command::new("which")
@@ -42,42 +80,17 @@ fn detect_terminal() -> Option<String> {
     None
 }
 
-/// Main configuration
-#[derive(Debug, Clone, Deserialize)]
-pub struct Config {
-    /// Default configuration for all portals
-    #[serde(default)]
-    pub default: PortalConfig,
-
-    /// File chooser portal config
-    #[serde(default, rename = "file-chooser")]
-    pub file_chooser: PortalConfig,
-
-    /// Screenshot portal config
-    #[serde(default)]
-    pub screenshot: PortalConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            default: PortalConfig {
-                exec: detect_terminal(),
-                bin: HashMap::new(),
-            },
-            file_chooser: PortalConfig::default(),
-            screenshot: PortalConfig::default(),
-        }
-    }
-}
-
 impl Config {
     /// Load config from default location (~/.config/portty/config.toml)
     pub fn load() -> Self {
         Self::config_path()
             .and_then(|path| std::fs::read_to_string(&path).ok())
             .and_then(|content| toml::from_str(&content).ok())
-            .unwrap_or_default()
+            .unwrap_or_else(|| Self {
+                exec: detect_terminal(),
+                bin: HashMap::new(),
+                ext: RootExt::default(),
+            })
     }
 
     /// Get config file path
@@ -85,12 +98,60 @@ impl Config {
         dirs::config_dir().map(|p| p.join("portty/config.toml"))
     }
 
-    /// Get portal-specific config
-    pub fn get_portal_config(&self, portal: &str) -> &PortalConfig {
-        match portal {
-            "file-chooser" => &self.file_chooser,
-            "screenshot" => &self.screenshot,
-            _ => &self.default,
+    /// Get effective exec for file-chooser operation
+    /// Priority: operation-specific → file-chooser → root default
+    pub fn file_chooser_exec(&self, op: FileChooserOp) -> Option<&str> {
+        let fc = self.ext.file_chooser.as_ref();
+
+        // Check operation-specific config
+        let op_exec = fc.and_then(|fc| {
+            let op_config = match op {
+                FileChooserOp::OpenFile => fc.ext.open_file.as_ref(),
+                FileChooserOp::SaveFile => fc.ext.save_file.as_ref(),
+                FileChooserOp::SaveFiles => fc.ext.save_files.as_ref(),
+            };
+            op_config.and_then(|c| c.exec.as_deref())
+        });
+
+        // Check file-chooser base config
+        let fc_exec = fc.and_then(|fc| fc.exec.as_deref());
+
+        // Fall back to root default
+        op_exec
+            .or(fc_exec)
+            .or(self.exec.as_deref())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Get effective bin shims for file-chooser operation (merged)
+    pub fn file_chooser_bin(&self, op: FileChooserOp) -> HashMap<String, String> {
+        let mut bin = self.bin.clone();
+
+        if let Some(fc) = &self.ext.file_chooser {
+            // Merge file-chooser base bins
+            bin.extend(fc.bin.clone());
+
+            // Merge operation-specific bins
+            let op_config = match op {
+                FileChooserOp::OpenFile => fc.ext.open_file.as_ref(),
+                FileChooserOp::SaveFile => fc.ext.save_file.as_ref(),
+                FileChooserOp::SaveFiles => fc.ext.save_files.as_ref(),
+            };
+            if let Some(c) = op_config {
+                bin.extend(c.bin.clone());
+            }
         }
+
+        bin
+    }
+
+    /// Get screenshot exec
+    pub fn screenshot_exec(&self) -> Option<&str> {
+        self.ext
+            .screenshot
+            .as_ref()
+            .and_then(|s| s.exec.as_deref())
+            .or(self.exec.as_deref())
+            .filter(|s| !s.is_empty())
     }
 }

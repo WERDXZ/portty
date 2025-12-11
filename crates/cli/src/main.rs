@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use thiserror::Error;
 
-use portty_ipc::ipc::{read_message, write_message, IpcError};
+use portty_ipc::ipc::{IpcError, read_message, write_message};
 use portty_ipc::queue::QueuedCommand;
 use portty_ipc::{
     DaemonExtension, DaemonRequest, DaemonResponse, DaemonResponseExtension, PortalType, Request,
@@ -118,7 +118,14 @@ fn main() -> ExitCode {
         Some(cmd) => run_command(ctx, cli.session, cmd),
         None => {
             // No command - show current selection
-            run_command(ctx, cli.session, Command::Select { items: vec![], stdin: false })
+            run_command(
+                ctx,
+                cli.session,
+                Command::Select {
+                    items: vec![],
+                    stdin: false,
+                },
+            )
         }
     }
 }
@@ -149,7 +156,10 @@ fn send_daemon_request(req: &DaemonRequest) -> Result<DaemonResponse, CliError> 
 }
 
 /// Send request to session socket
-fn send_session_request(socket_path: &str, req: &SessionRequest) -> Result<SessionResponse, CliError> {
+fn send_session_request(
+    socket_path: &str,
+    req: &SessionRequest,
+) -> Result<SessionResponse, CliError> {
     send_request(socket_path, req)
 }
 
@@ -206,7 +216,12 @@ fn cmd_show_queue() -> ExitCode {
                 println!("Submissions ({}):", status.submissions_count);
                 for (i, sub) in status.submissions.iter().enumerate() {
                     let portal = sub.portal.map_or("any".to_string(), |p| p.to_string());
-                    println!("  {}. [{}] {} command(s)", i + 1, portal, sub.commands.len());
+                    println!(
+                        "  {}. [{}] {} command(s)",
+                        i + 1,
+                        portal,
+                        sub.commands.len()
+                    );
                     for cmd in &sub.commands {
                         print_command(0, cmd, "       ");
                     }
@@ -346,7 +361,10 @@ fn parse_items(items: &[String], stdin: bool) -> Result<Vec<String>, CliError> {
             .map(|l| to_uri(&l).map(Cow::into_owned))
             .collect()
     } else {
-        items.iter().map(|f| to_uri(f).map(Cow::into_owned)).collect()
+        items
+            .iter()
+            .map(|f| to_uri(f).map(Cow::into_owned))
+            .collect()
     }
 }
 
@@ -438,10 +456,18 @@ fn run_daemon_command(session_id: Option<String>, cmd: Command) -> ExitCode {
                         return ExitCode::from(1);
                     }
                 };
-                return run_session_command(&session.socket_path, Command::Select { items: vec![], stdin: false });
+                return run_session_command(
+                    &session.socket_path,
+                    Command::Select {
+                        items: vec![],
+                        stdin: false,
+                    },
+                );
             }
 
-            match send_daemon_request(&Request::Extended(DaemonExtension::QueuePush(QueuedCommand::Select(uris)))) {
+            match send_daemon_request(&Request::Extended(DaemonExtension::QueuePush(
+                QueuedCommand::Select(uris),
+            ))) {
                 Ok(Response::Ok) => {
                     println!("Queued select");
                     ExitCode::SUCCESS
@@ -470,7 +496,9 @@ fn run_daemon_command(session_id: Option<String>, cmd: Command) -> ExitCode {
                 }
             };
 
-            match send_daemon_request(&Request::Extended(DaemonExtension::QueuePush(QueuedCommand::Deselect(uris)))) {
+            match send_daemon_request(&Request::Extended(DaemonExtension::QueuePush(
+                QueuedCommand::Deselect(uris),
+            ))) {
                 Ok(Response::Ok) => {
                     println!("Queued deselect");
                     ExitCode::SUCCESS
@@ -491,7 +519,9 @@ fn run_daemon_command(session_id: Option<String>, cmd: Command) -> ExitCode {
         }
 
         Command::Clear => {
-            match send_daemon_request(&Request::Extended(DaemonExtension::QueuePush(QueuedCommand::Clear))) {
+            match send_daemon_request(&Request::Extended(DaemonExtension::QueuePush(
+                QueuedCommand::Clear,
+            ))) {
                 Ok(Response::Ok) => {
                     println!("Queued clear");
                     ExitCode::SUCCESS
@@ -523,7 +553,9 @@ fn run_daemon_command(session_id: Option<String>, cmd: Command) -> ExitCode {
                 None => None,
             };
 
-            match send_daemon_request(&Request::Extended(DaemonExtension::QueueSubmit { portal: portal_type })) {
+            match send_daemon_request(&Request::Extended(DaemonExtension::QueueSubmit {
+                portal: portal_type,
+            })) {
                 Ok(Response::Ok) => {
                     let portal_str = portal_type.map_or("any".to_string(), |p| p.to_string());
                     println!("Submitted for [{}]", portal_str);
@@ -585,7 +617,10 @@ mod tests {
 
     #[test]
     fn absolute_path_to_file_uri() {
-        assert_eq!(to_uri("/home/user/test.txt").unwrap(), "file:///home/user/test.txt");
+        assert_eq!(
+            to_uri("/home/user/test.txt").unwrap(),
+            "file:///home/user/test.txt"
+        );
     }
 
     #[test]
