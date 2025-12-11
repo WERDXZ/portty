@@ -84,14 +84,4 @@ impl SubmissionQueue {
         self.pending.clear();
         self.submissions.clear();
     }
-
-    /// Iterate over pending commands
-    pub fn pending_iter(&self) -> impl Iterator<Item = &QueuedCommand> {
-        self.pending.iter()
-    }
-
-    /// Iterate over submissions
-    pub fn submissions_iter(&self) -> impl Iterator<Item = &Submission> {
-        self.submissions.iter()
-    }
 }

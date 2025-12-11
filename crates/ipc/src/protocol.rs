@@ -155,35 +155,6 @@ pub type DaemonResponse = Response<DaemonResponseExtension>;
 
 // === Conversion helpers ===
 
-impl<Ext> Request<Ext> {
-    /// Convert a base request to any extension type
-    pub fn into_extended<NewExt>(self) -> Option<Request<NewExt>> {
-        match self {
-            Request::Select(v) => Some(Request::Select(v)),
-            Request::Deselect(v) => Some(Request::Deselect(v)),
-            Request::Clear => Some(Request::Clear),
-            Request::Submit => Some(Request::Submit),
-            Request::Cancel => Some(Request::Cancel),
-            Request::GetOptions => Some(Request::GetOptions),
-            Request::GetSelection => Some(Request::GetSelection),
-            Request::Extended(_) => None, // Can't convert extensions
-        }
-    }
-}
-
-impl<Ext> Response<Ext> {
-    /// Convert a base response to any extension type
-    pub fn into_extended<NewExt>(self) -> Option<Response<NewExt>> {
-        match self {
-            Response::Ok => Some(Response::Ok),
-            Response::Selection(v) => Some(Response::Selection(v)),
-            Response::Options(o) => Some(Response::Options(o)),
-            Response::Error(e) => Some(Response::Error(e)),
-            Response::Extended(_) => None,
-        }
-    }
-}
-
 impl From<SessionRequest> for DaemonRequest {
     fn from(req: SessionRequest) -> Self {
         match req {

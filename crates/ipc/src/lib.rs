@@ -4,7 +4,6 @@ pub mod portal_type;
 pub mod protocol;
 pub mod queue;
 pub mod request;
-pub mod session;
 
 pub use portal_type::PortalType;
 pub use protocol::{

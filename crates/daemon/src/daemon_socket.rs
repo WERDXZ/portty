@@ -36,6 +36,18 @@ pub struct RegisteredSession {
     pub socket_path: PathBuf,
 }
 
+impl From<&RegisteredSession> for SessionInfo {
+    fn from(s: &RegisteredSession) -> Self {
+        SessionInfo {
+            id: s.id.clone(),
+            portal: s.portal,
+            title: s.title.clone(),
+            created: s.created,
+            socket_path: s.socket_path.to_string_lossy().into_owned(),
+        }
+    }
+}
+
 impl SessionRegistry {
     pub fn new() -> Self {
         Self::default()
@@ -227,30 +239,14 @@ fn handle_daemon_extension(
     match ext {
         DaemonExtension::ListSessions => {
             let st = state.read().unwrap();
-            let sessions = st
-                .sessions
-                .iter()
-                .map(|s| SessionInfo {
-                    id: s.id.clone(),
-                    portal: s.portal,
-                    title: s.title.clone(),
-                    created: s.created,
-                    socket_path: s.socket_path.to_string_lossy().into_owned(),
-                })
-                .collect();
+            let sessions = st.sessions.iter().map(SessionInfo::from).collect();
             Response::Extended(DaemonResponseExtension::Sessions(sessions))
         }
 
         DaemonExtension::GetSession(id) => {
             let st = state.read().unwrap();
             match st.sessions.get(&id) {
-                Some(s) => Response::Extended(DaemonResponseExtension::Session(SessionInfo {
-                    id: s.id.clone(),
-                    portal: s.portal,
-                    title: s.title.clone(),
-                    created: s.created,
-                    socket_path: s.socket_path.to_string_lossy().into_owned(),
-                })),
+                Some(s) => Response::Extended(DaemonResponseExtension::Session(s.into())),
                 None => Response::Error(format!("Session not found: {id}")),
             }
         }
