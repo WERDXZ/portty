@@ -95,7 +95,7 @@ impl TtyFileChooser {
         )
         .map_err(|e| FileChooserError::Other(format!("failed to create session: {e}")))?;
 
-        // Register session before spawning
+        // Register session and transfer any pending commands
         let session_id = session.id().to_string();
         {
             let mut st = self.state.write().unwrap();
@@ -104,8 +104,18 @@ impl TtyFileChooser {
                 portal,
                 title: session.title().map(String::from),
                 created: session.created(),
-                socket_path: session.socket_path(),
+                socket_path: session.socket_path().to_path_buf(),
             });
+
+            // Transfer pending commands to session (user can still review/modify)
+            if !st.queue.pending.is_empty() {
+                let pending = std::mem::take(&mut st.queue.pending);
+                info!(
+                    commands = pending.len(),
+                    "Transferring pending commands to session"
+                );
+                session.apply_pending(pending);
+            }
         }
 
         // Only spawn terminal in non-headless mode

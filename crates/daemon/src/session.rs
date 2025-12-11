@@ -1,12 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use portty_ipc::ipc::file_chooser::SessionOptions;
 use portty_ipc::ipc::{read_message, write_message};
+use portty_ipc::queue::QueuedCommand;
 use portty_ipc::{SessionRequest, SessionResponse};
 
 /// Default command shims for each portal type
@@ -24,6 +25,7 @@ fn default_commands(portal: &str) -> &'static [(&'static str, &'static str)] {
 pub struct SessionId(String);
 
 impl SessionId {
+    /// Create a new unique session ID based on current timestamp
     pub fn new() -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
         let ts = SystemTime::now()
@@ -33,8 +35,15 @@ impl SessionId {
         Self(format!("{:x}", ts))
     }
 
+    /// Get the session ID as a string slice
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -44,14 +53,27 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-/// A running session
+/// A running portal session
+///
+/// Represents an active file chooser or other portal dialog. Each session:
+/// - Has a unique ID and temporary directory under `/tmp/portty/<uid>/`
+/// - Creates shell shims in `bin/` for CLI commands (sel, submit, cancel)
+/// - Listens on a Unix socket for IPC commands
+/// - Optionally spawns a terminal process for interactive use
+///
+/// Sessions can run in two modes:
+/// - **Terminal mode**: Spawns a terminal with environment set up
+/// - **Headless mode**: No terminal, controlled entirely via CLI/socket
 pub struct Session {
     id: SessionId,
     dir: PathBuf,
+    /// Cached socket path to avoid repeated PathBuf::join() calls
+    socket_path: PathBuf,
     child: Option<Child>,
     listener: Option<UnixListener>,
     options: SessionOptions,
-    selection: Vec<String>,
+    /// Selected URIs (HashSet for O(1) lookups and automatic deduplication)
+    selection: HashSet<String>,
     created: u64,
 }
 
@@ -113,10 +135,11 @@ impl Session {
         Ok(Self {
             id,
             dir,
+            socket_path: sock_path,
             child: None,
             listener: Some(listener),
             options,
-            selection: Vec::new(),
+            selection: HashSet::new(),
             created,
         })
     }
@@ -140,9 +163,31 @@ impl Session {
         self.created
     }
 
-    /// Get socket path
-    pub fn socket_path(&self) -> PathBuf {
-        self.dir.join("sock")
+    /// Get socket path (cached)
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    /// Apply pending commands to pre-populate the selection
+    ///
+    /// This allows incomplete queue commands to be transferred to an
+    /// interactive session, letting the user review before submitting.
+    pub fn apply_pending(&mut self, commands: Vec<QueuedCommand>) {
+        for cmd in commands {
+            match cmd {
+                QueuedCommand::Select(uris) => {
+                    self.selection.extend(uris);
+                }
+                QueuedCommand::Deselect(uris) => {
+                    for uri in uris {
+                        self.selection.remove(&uri);
+                    }
+                }
+                QueuedCommand::Clear => {
+                    self.selection.clear();
+                }
+            }
+        }
     }
 
     /// Spawn a terminal with the given exec command
@@ -245,12 +290,12 @@ impl Session {
             }
         }
 
-        // Determine result
+        // Determine result - use mem::take to avoid clone since session is consumed
         let result = if cancelled {
             SessionResult::Cancelled
         } else if submitted && !self.selection.is_empty() {
             SessionResult::Success {
-                uris: self.selection.clone(),
+                uris: std::mem::take(&mut self.selection).into_iter().collect(),
             }
         } else {
             // No selection or not submitted properly
@@ -270,19 +315,19 @@ impl Session {
 
         match req {
             Request::GetOptions => Response::Options(self.options.clone()),
-            Request::GetSelection => Response::Selection(self.selection.clone()),
+            Request::GetSelection => {
+                // Convert HashSet to Vec for response
+                Response::Selection(self.selection.iter().cloned().collect())
+            }
             Request::Select(uris) => {
-                // Add to selection (deduplicated)
-                for uri in uris {
-                    if !self.selection.contains(&uri) {
-                        self.selection.push(uri);
-                    }
-                }
+                // HashSet handles deduplication automatically
+                self.selection.extend(uris);
                 Response::Ok
             }
             Request::Deselect(uris) => {
-                // Remove from selection
-                self.selection.retain(|u| !uris.contains(u));
+                for uri in uris {
+                    self.selection.remove(&uri);
+                }
                 Response::Ok
             }
             Request::Clear => {

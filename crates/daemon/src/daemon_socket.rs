@@ -6,11 +6,11 @@
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-use portty_ipc::ipc::{read_message, write_message};
+use portty_ipc::ipc::{read_message, write_message, IpcError};
 use portty_ipc::queue::{QueuedCommand, SubmissionQueue};
 use portty_ipc::{
     DaemonExtension, DaemonRequest, DaemonResponse, DaemonResponseExtension, PortalType,
@@ -20,19 +20,71 @@ use tracing::{debug, info, warn};
 
 use crate::session::base_dir;
 
-/// Registry of active sessions
+/// Error type for daemon socket operations
+#[derive(Debug)]
+pub enum DaemonError {
+    /// IPC protocol error
+    Ipc(IpcError),
+    /// Failed to connect to session socket
+    SessionConnect(std::io::Error),
+    /// Session returned an error response
+    SessionError(String),
+    /// Unexpected response from session
+    UnexpectedResponse,
+}
+
+impl std::fmt::Display for DaemonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DaemonError::Ipc(e) => write!(f, "IPC error: {e}"),
+            DaemonError::SessionConnect(e) => write!(f, "session connection failed: {e}"),
+            DaemonError::SessionError(e) => write!(f, "session error: {e}"),
+            DaemonError::UnexpectedResponse => write!(f, "unexpected response from session"),
+        }
+    }
+}
+
+impl std::error::Error for DaemonError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DaemonError::Ipc(e) => Some(e),
+            DaemonError::SessionConnect(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<IpcError> for DaemonError {
+    fn from(e: IpcError) -> Self {
+        DaemonError::Ipc(e)
+    }
+}
+
+/// Registry of active portal sessions
+///
+/// Maps session IDs to their metadata. Used by the daemon to:
+/// - Route CLI commands to the correct session
+/// - List active sessions for the user
+/// - Auto-select when only one session is active
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
     sessions: HashMap<String, RegisteredSession>,
 }
 
-/// Information about a registered session
+/// Metadata about a registered session
+///
+/// Stored in the [`SessionRegistry`] for session lookup and management.
 #[derive(Debug, Clone)]
 pub struct RegisteredSession {
+    /// Unique session identifier
     pub id: String,
+    /// Type of portal (FileChooser, etc.)
     pub portal: PortalType,
+    /// Human-readable title from portal request
     pub title: Option<String>,
+    /// Unix timestamp when session was created
     pub created: u64,
+    /// Path to the session's Unix socket
     pub socket_path: PathBuf,
 }
 
@@ -49,10 +101,6 @@ impl From<&RegisteredSession> for SessionInfo {
 }
 
 impl SessionRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn register(&mut self, session: RegisteredSession) {
         info!(id = %session.id, portal = %session.portal, "Registering session");
         self.sessions.insert(session.id.clone(), session);
@@ -81,27 +129,29 @@ impl SessionRegistry {
 }
 
 /// Shared daemon state
+///
+/// Thread-safe state shared between the D-Bus portal handlers and the
+/// daemon control socket. Protected by `RwLock` for concurrent access.
+#[derive(Default)]
 pub struct DaemonState {
+    /// Registry of active portal sessions
     pub sessions: SessionRegistry,
+    /// Queue of pending commands and submissions
     pub queue: SubmissionQueue,
 }
 
 impl DaemonState {
+    /// Create a new daemon state with empty session registry and queue
     pub fn new() -> Self {
-        Self {
-            sessions: SessionRegistry::new(),
-            queue: SubmissionQueue::new(),
-        }
+        Self::default()
     }
 }
 
-impl Default for DaemonState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Daemon socket server
+/// Daemon control socket server
+///
+/// Listens on `/tmp/portty/<uid>/daemon.sock` for CLI commands.
+/// Handles session management, queue operations, and forwards
+/// session commands to the appropriate session sockets.
 pub struct DaemonSocket {
     state: Arc<RwLock<DaemonState>>,
     listener: Option<UnixListener>,
@@ -158,7 +208,7 @@ impl DaemonSocket {
 fn handle_connection(
     mut stream: UnixStream,
     state: Arc<RwLock<DaemonState>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), DaemonError> {
     let req: DaemonRequest = read_message(&mut stream)?;
     debug!(?req, "Received daemon request");
 
@@ -227,7 +277,7 @@ fn route_session_command(
     // Forward to session
     match send_to_session(&session.socket_path, &req) {
         Ok(resp) => resp.into(), // Convert SessionResponse to DaemonResponse
-        Err(e) => Response::Error(e),
+        Err(e) => Response::Error(e.to_string()),
     }
 }
 
@@ -323,7 +373,7 @@ fn handle_daemon_extension(
 }
 
 /// Apply queued commands to a session and submit
-fn apply_to_session(socket_path: &PathBuf, commands: &[QueuedCommand]) -> Result<(), String> {
+fn apply_to_session(socket_path: &Path, commands: &[QueuedCommand]) -> Result<(), DaemonError> {
     // Send each command
     for cmd in commands {
         let req: SessionRequest = match cmd {
@@ -335,8 +385,8 @@ fn apply_to_session(socket_path: &PathBuf, commands: &[QueuedCommand]) -> Result
         let resp = send_to_session(socket_path, &req)?;
         match resp {
             Response::Ok => {}
-            Response::Error(e) => return Err(e),
-            _ => return Err("Unexpected response".to_string()),
+            Response::Error(e) => return Err(DaemonError::SessionError(e)),
+            _ => return Err(DaemonError::UnexpectedResponse),
         }
     }
 
@@ -344,19 +394,16 @@ fn apply_to_session(socket_path: &PathBuf, commands: &[QueuedCommand]) -> Result
     let resp = send_to_session(socket_path, &Request::Submit)?;
     match resp {
         Response::Ok => Ok(()),
-        Response::Error(e) => Err(e),
-        _ => Err("Unexpected response".to_string()),
+        Response::Error(e) => Err(DaemonError::SessionError(e)),
+        _ => Err(DaemonError::UnexpectedResponse),
     }
 }
 
 /// Send a request to session socket
-fn send_to_session(socket_path: &PathBuf, req: &SessionRequest) -> Result<SessionResponse, String> {
+fn send_to_session(socket_path: &Path, req: &SessionRequest) -> Result<SessionResponse, DaemonError> {
     let mut stream = UnixStream::connect(socket_path)
-        .map_err(|e| format!("Failed to connect to session: {e}"))?;
+        .map_err(DaemonError::SessionConnect)?;
 
-    write_message(&mut stream, req)
-        .map_err(|e| format!("Failed to send: {e}"))?;
-
-    read_message(&mut stream)
-        .map_err(|e| format!("Failed to read: {e}"))
+    write_message(&mut stream, req)?;
+    read_message(&mut stream).map_err(DaemonError::from)
 }

@@ -1,11 +1,25 @@
 //! Unified IPC protocol with extensible request/response types
 //!
-//! Uses generic extension types for type-safe protocol extension:
-//! - Session socket speaks `SessionRequest` / `SessionResponse`
-//! - Daemon socket speaks `DaemonRequest` / `DaemonResponse`
+//! This module defines the wire protocol for communication between:
+//! - CLI → Daemon: Management commands (queue, session listing)
+//! - CLI → Session: Direct session control (select, submit, cancel)
+//! - Daemon → Session: Forwarded commands
 //!
-//! Base variants have identical wire format, enabling code reuse while
-//! maintaining type safety.
+//! # Extension Pattern
+//!
+//! Uses generic extension types for type-safe protocol extension:
+//! - [`SessionRequest`] / [`SessionResponse`]: Base commands only
+//! - [`DaemonRequest`] / [`DaemonResponse`]: Base + daemon extensions
+//!
+//! Base variants share identical wire format, enabling code reuse while
+//! maintaining type safety. The [`NoExtension`] type is uninhabited,
+//! making `Extended(NoExtension)` unconstructible at compile time.
+//!
+//! # Wire Format
+//!
+//! Messages are encoded with bincode using length-prefixed framing:
+//! - 4-byte little-endian length prefix
+//! - bincode-encoded payload
 
 use bincode::{Decode, Encode};
 

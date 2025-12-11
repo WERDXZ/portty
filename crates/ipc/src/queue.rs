@@ -6,11 +6,17 @@ use bincode::{Decode, Encode};
 
 use crate::PortalType;
 
-/// A command that can be queued
+/// A command that can be queued for later execution
+///
+/// These commands are stored by the daemon and applied when a matching
+/// portal session becomes active.
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum QueuedCommand {
+    /// Add URIs to the selection
     Select(Vec<String>),
+    /// Remove URIs from the selection
     Deselect(Vec<String>),
+    /// Clear all selected URIs
     Clear,
 }
 
