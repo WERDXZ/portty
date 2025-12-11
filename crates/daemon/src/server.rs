@@ -4,20 +4,20 @@ use tracing::{info, warn};
 use zbus::connection::Builder;
 
 use crate::config::Config;
-use crate::daemon_socket::{DaemonSocket, DaemonState};
+use crate::daemon_socket::{DaemonCtl, DaemonSocket, DaemonState};
+use crate::dbus::file_chooser::FileChooserPortal;
+use crate::dbus::screenshot::ScreenshotPortal;
 use crate::portal::{TtyFileChooser, TtyScreenshot};
-use portty_ipc::portal::file_chooser::FileChooserPortal;
-use portty_ipc::portal::screenshot::ScreenshotPortal;
 
 const SERVICE_NAME: &str = "org.freedesktop.impl.portal.desktop.tty";
 const OBJECT_PATH: &str = "/org/freedesktop/portal/desktop";
 
-pub struct Server {
+pub struct Daemon {
     config: Arc<Config>,
     state: Arc<RwLock<DaemonState>>,
 }
 
-impl Server {
+impl Daemon {
     pub fn new(config: Config) -> Self {
         Self {
             config: Arc::new(config),
@@ -37,15 +37,29 @@ impl Server {
             }
         }
 
-        let builder = Builder::session()?
-            .name(SERVICE_NAME)?;
+        // Start daemon FIFO in background thread
+        match DaemonCtl::new(Arc::clone(&self.state)) {
+            Ok(daemon_ctl) => {
+                daemon_ctl.spawn();
+                info!("Daemon FIFO started");
+            }
+            Err(e) => {
+                warn!("Failed to create daemon FIFO: {e}");
+            }
+        }
+
+        let builder = Builder::session()?.name(SERVICE_NAME)?;
 
         // Register portals
         let builder = self.register_portals(builder)?;
 
         let _connection = builder.build().await?;
 
-        info!(service = SERVICE_NAME, path = OBJECT_PATH, "Registered on D-Bus session bus");
+        info!(
+            service = SERVICE_NAME,
+            path = OBJECT_PATH,
+            "Registered on D-Bus session bus"
+        );
         info!("Waiting for requests...");
 
         // Keep running
@@ -56,20 +70,12 @@ impl Server {
 
     fn register_portals(&self, builder: Builder<'static>) -> Result<Builder<'static>, zbus::Error> {
         info!("Registering FileChooser portal");
-        let file_chooser = TtyFileChooser::new(
-            Arc::clone(&self.config),
-            Arc::clone(&self.state),
-        );
-        let builder = builder
-            .serve_at(OBJECT_PATH, FileChooserPortal::from(file_chooser))?;
+        let file_chooser = TtyFileChooser::new(Arc::clone(&self.config), Arc::clone(&self.state));
+        let builder = builder.serve_at(OBJECT_PATH, FileChooserPortal::from(file_chooser))?;
 
         info!("Registering Screenshot portal");
-        let screenshot = TtyScreenshot::new(
-            Arc::clone(&self.config),
-            Arc::clone(&self.state),
-        );
-        let builder = builder
-            .serve_at(OBJECT_PATH, ScreenshotPortal::from(screenshot))?;
+        let screenshot = TtyScreenshot::new(Arc::clone(&self.config), Arc::clone(&self.state));
+        let builder = builder.serve_at(OBJECT_PATH, ScreenshotPortal::from(screenshot))?;
 
         Ok(builder)
     }

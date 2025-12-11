@@ -1,11 +1,12 @@
 use futures_util::future::abortable;
 use zbus::zvariant::{DeserializeDict, ObjectPath, SerializeDict, Type};
 
-use crate::request::Request;
+use crate::dbus::request::Request;
 
 /// Options for Screenshot request
 #[derive(Debug, Clone, Default, DeserializeDict, Type)]
 #[zvariant(signature = "dict")]
+#[allow(unused)]
 pub struct ScreenshotOptions {
     modal: Option<bool>,
     interactive: Option<bool>,

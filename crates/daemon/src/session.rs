@@ -1,44 +1,69 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 
-use portty_ipc::ipc::context::PortalContext;
-use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SelectionMode};
-use portty_ipc::ipc::{read_message, write_message};
-use portty_ipc::queue::QueuedCommand;
-use portty_ipc::{SessionRequest, SessionResponse};
-use tracing::warn;
+use libportty::{files, paths};
+use tracing::info;
 
-/// Default command shims for each portal type
-/// Returns (shim_name, portty_subcommand) pairs
-fn default_commands(portal: &str) -> &'static [(&'static str, &'static str)] {
-    match portal {
-        // "sel" shim avoids conflict with POSIX `select` builtin
-        "file-chooser" => &[("sel", "select"), ("desel", "deselect"), ("reset", "reset"), ("submit", "submit"), ("cancel", "cancel"), ("info", "info")],
-        "screenshot" => &[("sel", "select"), ("submit", "submit"), ("cancel", "cancel"), ("info", "info")],
-        _ => &[],
+/// Default command shims — same for all portals
+const DEFAULT_SHIMS: &[(&str, &str)] = &[
+    ("sel", "edit"),
+    ("desel", "edit --remove"),
+    ("reset", "edit --reset"),
+    ("submit", "submit"),
+    ("cancel", "cancel"),
+    ("info", "info"),
+];
+
+/// Signal sent to the session thread
+pub enum SessionSignal {
+    Submit,
+    Cancel,
+    ChildExited,
+}
+
+/// Control handle held by the daemon to signal a session
+pub struct SessionControl {
+    sender: mpsc::Sender<SessionSignal>,
+}
+
+impl SessionControl {
+    pub fn new(sender: mpsc::Sender<SessionSignal>) -> Self {
+        Self { sender }
+    }
+
+    pub fn submit(&self) {
+        let _ = self.sender.send(SessionSignal::Submit);
+    }
+
+    pub fn cancel(&self) {
+        let _ = self.sender.send(SessionSignal::Cancel);
     }
 }
+
+/// Monotonic counter to guarantee unique session IDs even within the same nanosecond
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Unique session identifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionId(String);
 
 impl SessionId {
-    /// Create a new unique session ID based on current timestamp
     pub fn new() -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        Self(format!("{:x}", ts))
+        let seq = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self(format!("{:x}-{:x}", ts, seq))
     }
 
-    /// Get the session ID as a string slice
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -57,65 +82,59 @@ impl std::fmt::Display for SessionId {
 }
 
 /// A running portal session
-///
-/// Represents an active file chooser or other portal dialog. Each session:
-/// - Has a unique ID and temporary directory under `/tmp/portty/<uid>/`
-/// - Creates shell shims in `bin/` for CLI commands (sel, submit, cancel)
-/// - Listens on a Unix socket for IPC commands
-/// - Optionally spawns a terminal process for interactive use
-///
-/// Sessions can run in two modes:
-/// - **Terminal mode**: Spawns a terminal with environment set up
-/// - **Headless mode**: No terminal, controlled entirely via CLI/socket
 pub struct Session {
     id: SessionId,
     dir: PathBuf,
-    /// Cached socket path to avoid repeated PathBuf::join() calls
-    socket_path: PathBuf,
     child: Option<Child>,
-    listener: Option<UnixListener>,
-    context: PortalContext,
-    /// Selected URIs (HashSet for O(1) lookups and automatic deduplication)
-    selection: HashSet<String>,
-    /// Initial selection (for reset)
-    initial_selection: HashSet<String>,
+    sender: mpsc::Sender<SessionSignal>,
+    receiver: mpsc::Receiver<SessionSignal>,
     created: u64,
-    /// If true, selection is limited to 1 item (for SaveFile)
-    single_select: bool,
 }
 
 impl Session {
-    /// Create a new session with its directory
-    pub fn new(
+    /// Create a new session with its directory and file-based state.
+    /// Use `SessionRegistry::create_session` instead of calling this directly.
+    pub(crate) fn new(
         portal: &str,
-        context: PortalContext,
+        operation: &str,
+        options: &serde_json::Value,
+        initial_entries: &[String],
         custom_bins: &HashMap<String, String>,
+        sender: mpsc::Sender<SessionSignal>,
+        receiver: mpsc::Receiver<SessionSignal>,
     ) -> std::io::Result<Self> {
         let id = SessionId::new();
-        let dir = session_dir(&id);
+        paths::ensure_base_dir()?;
+        let dir = paths::base_dir().join(id.as_str());
 
         // Create session directory
         fs::create_dir_all(&dir)?;
 
         // Write portal type
-        fs::write(dir.join("portal"), portal)?;
+        fs::write(dir.join("portal"), format!("{}\n{}", portal, operation))?;
+
+        // Write options.json
+        let options_json = serde_json::to_string_pretty(options).map_err(std::io::Error::other)?;
+        fs::write(dir.join("options.json"), options_json)?;
+
+        // Build initial submission
+        let submission_content = if initial_entries.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", initial_entries.join("\n"))
+        };
+        fs::write(dir.join("submission"), &submission_content)?;
 
         // Create bin directory with shims
         let bin_dir = dir.join("bin");
         fs::create_dir_all(&bin_dir)?;
 
-        // Create default command shims (call portty CLI)
-        for (shim_name, subcommand) in default_commands(portal) {
-            // Skip if overridden by custom bin
+        for (shim_name, subcommand) in DEFAULT_SHIMS {
             if custom_bins.contains_key(*shim_name) {
                 continue;
             }
             let shim_path = bin_dir.join(shim_name);
-            // portty auto-detects session mode via PORTTY_SOCK env var
-            let shim_content = format!(
-                "#!/bin/sh\nexec portty {} \"$@\"\n",
-                subcommand
-            );
+            let shim_content = format!("#!/bin/sh\nexec portty {} \"$@\"\n", subcommand);
             fs::write(&shim_path, shim_content)?;
             fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))?;
         }
@@ -128,10 +147,6 @@ impl Session {
             fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))?;
         }
 
-        // Create Unix socket
-        let sock_path = dir.join("sock");
-        let listener = UnixListener::bind(&sock_path)?;
-
         // Get creation timestamp
         use std::time::{SystemTime, UNIX_EPOCH};
         let created = SystemTime::now()
@@ -139,94 +154,32 @@ impl Session {
             .unwrap_or_default()
             .as_secs();
 
-        // Derive single_select and initial selection from context
-        let (single_select, selection) = match &context {
-            PortalContext::FileChooser(opts) => {
-                let single = matches!(opts.mode, SelectionMode::Save);
-                let mut sel = HashSet::new();
-                if let Some(ref folder) = opts.current_folder {
-                    match opts.mode {
-                        SelectionMode::SaveMultiple if !opts.candidates.is_empty() => {
-                            sel.insert(format!("file://{}", folder));
-                        }
-                        SelectionMode::Save => {
-                            if let Some(name) = opts.candidates.first() {
-                                let path = Path::new(folder).join(name);
-                                sel.insert(format!("file://{}", path.display()));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                (single, sel)
-            }
-            PortalContext::Screenshot(_) => {
-                // Screenshot always single-select (one URI result)
-                (true, HashSet::new())
-            }
-        };
-
-        let initial_selection = selection.clone();
-
         Ok(Self {
             id,
             dir,
-            socket_path: sock_path,
             child: None,
-            listener: Some(listener),
-            context,
-            selection,
-            initial_selection,
+            sender,
+            receiver,
             created,
-            single_select,
         })
     }
 
-    /// Get session ID
     pub fn id(&self) -> &SessionId {
         &self.id
     }
 
-    /// Get session title (from context)
-    pub fn title(&self) -> Option<&str> {
-        self.context.title()
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
-    /// Get creation timestamp
     pub fn created(&self) -> u64 {
         self.created
     }
 
-    /// Get socket path (cached)
-    pub fn socket_path(&self) -> &Path {
-        &self.socket_path
-    }
-
-    /// Apply pending commands to pre-populate the selection
-    ///
-    /// This allows incomplete queue commands to be transferred to an
-    /// interactive session, letting the user review before submitting.
-    pub fn apply_pending(&mut self, commands: Vec<QueuedCommand>) {
-        for cmd in commands {
-            match cmd {
-                QueuedCommand::Select(uris) => {
-                    self.selection.extend(uris);
-                }
-                QueuedCommand::Deselect(uris) => {
-                    for uri in uris {
-                        self.selection.remove(&uri);
-                    }
-                }
-                QueuedCommand::Clear => {
-                    self.selection.clear();
-                }
-            }
-        }
-    }
-
     /// Spawn a terminal with the given exec command
-    pub fn spawn(&mut self, exec: &str, operation: &str) -> std::io::Result<()> {
-        // Parse exec command (simple shell-like splitting)
+    pub fn spawn(&mut self, exec: &str, portal: &str, operation: &str) -> std::io::Result<()> {
+        use std::os::linux::process::CommandExt as _;
+
         let parts: Vec<&str> = exec.split_whitespace().collect();
         if parts.is_empty() {
             return Err(std::io::Error::new(
@@ -237,22 +190,17 @@ impl Session {
 
         let (program, args) = parts.split_first().unwrap();
 
-        // Build environment
         let mut cmd = Command::new(program);
         cmd.args(args);
+        cmd.create_pidfd(true);
 
         let bin_dir = self.dir.join("bin");
 
-        let envs = self.context.env();
-        for (k, v) in envs.iter() {
-            cmd.env(k, v);
-        }
-
-        // Inject our environment variables
+        // Set universal env vars
         cmd.env("PORTTY_SESSION", self.id.as_str());
-        cmd.env("PORTTY_OPERATION", operation);
         cmd.env("PORTTY_DIR", &self.dir);
-        cmd.env("PORTTY_SOCK", self.dir.join("sock"));
+        cmd.env("PORTTY_PORTAL", portal);
+        cmd.env("PORTTY_OPERATION", operation);
 
         // Prepend session bin dir to PATH
         if let Ok(path) = std::env::var("PATH") {
@@ -267,160 +215,67 @@ impl Session {
         Ok(())
     }
 
-    /// Run the session, handling IPC and waiting for completion
+    /// Run the session, waiting for child exit or control signals.
     ///
-    /// In terminal mode (child process exists): exits when terminal closes
-    /// In headless mode (no child): waits for explicit Submit/Cancel via IPC
+    /// Converts the child process into a `PidFd` shared between a monitor
+    /// thread (that waits for exit) and this thread (that can kill on
+    /// submit/cancel). The channel `recv()` blocks cleanly with no polling.
     pub fn run(&mut self) -> std::io::Result<SessionResult> {
-        let listener = self.listener.take().ok_or_else(|| {
-            std::io::Error::other("no listener")
-        })?;
+        use std::os::linux::process::ChildExt as _;
 
-        // Set socket to non-blocking for polling
-        listener.set_nonblocking(true)?;
+        let pidfd = if let Some(child) = self.child.take() {
+            let pidfd = Arc::new(child.into_pidfd().map_err(|_child| {
+                std::io::Error::new(std::io::ErrorKind::Unsupported, "pidfd not available")
+            })?);
 
-        let mut cancelled = false;
-        let mut submitted = false;
-        let headless = self.child.is_none();
+            let monitor_pidfd = Arc::clone(&pidfd);
+            let sender = self.sender.clone();
+            std::thread::spawn(move || {
+                let _ = monitor_pidfd.wait();
+                let _ = sender.send(SessionSignal::ChildExited);
+            });
 
-        loop {
-            // Check if child is still running (only in terminal mode)
-            if let Some(ref mut child) = self.child {
-                match child.try_wait()? {
-                    Some(_status) => {
-                        // Child exited - treat as implicit submit
-                        submitted = true;
-                        break;
-                    }
-                    None => {
-                        // Still running, check for IPC
-                    }
-                }
-            }
-
-            // In headless mode, exit only on explicit submit/cancel
-            if headless && (submitted || cancelled) {
-                break;
-            }
-
-            // Try to accept a connection
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    stream.set_nonblocking(false)?;
-
-                    // Handle request
-                    match read_message::<SessionRequest>(&mut stream) {
-                        Ok(req) => {
-                            let resp = self.handle_request(req, &mut cancelled, &mut submitted);
-                            let _ = write_message(&mut stream, &resp);
-                        }
-                        Err(e) => {
-                            tracing::warn!("IPC read error: {e}");
-                        }
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No connection, sleep a bit
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                Err(e) => {
-                    tracing::warn!("Accept error: {e}");
-                }
-            }
-        }
-
-        // Determine result - use mem::take to avoid clone since session is consumed
-        let result = if cancelled {
-            SessionResult::Cancelled
-        } else if submitted && !self.selection.is_empty() {
-            SessionResult::Success {
-                uris: std::mem::take(&mut self.selection).into_iter().collect(),
-            }
+            Some(pidfd)
         } else {
-            // No selection or not submitted properly
-            SessionResult::Cancelled
+            None
         };
 
-        Ok(result)
-    }
-
-    fn handle_request(
-        &mut self,
-        req: SessionRequest,
-        cancelled: &mut bool,
-        submitted: &mut bool,
-    ) -> SessionResponse {
-        use portty_ipc::{Request, Response};
-
-        match req {
-            Request::GetOptions => Response::Options(self.context.clone()),
-            Request::GetSelection => {
-                // Convert HashSet to Vec for response
-                Response::Selection(self.selection.iter().cloned().collect())
-            }
-            Request::Select(uris) => {
-                // Check filters and warn if selection doesn't match (file-chooser only)
-                if let PortalContext::FileChooser(opts) = &self.context
-                    && !opts.filters.is_empty()
-                {
-                    for uri in &uris {
-                        if !matches_any_filter(uri, &opts.filters) {
-                            warn!(
-                                uri,
-                                "Selection does not match any filter (allowed but may not be intended)"
-                            );
-                        }
-                    }
+        match self.receiver.recv() {
+            Ok(SessionSignal::Submit) => {
+                if let Some(ref pidfd) = pidfd {
+                    let _ = pidfd.kill();
+                    let _ = pidfd.wait();
                 }
-
-                if self.single_select {
-                    // SaveFile: keep only the last selected item
-                    self.selection.clear();
-                    if let Some(uri) = uris.into_iter().last() {
-                        self.selection.insert(uri);
-                    }
-                } else {
-                    // HashSet handles deduplication automatically
-                    self.selection.extend(uris);
+                self.read_result()
+            }
+            Ok(SessionSignal::Cancel) => {
+                if let Some(ref pidfd) = pidfd {
+                    let _ = pidfd.kill();
+                    let _ = pidfd.wait();
                 }
-                Response::Ok
+                Ok(SessionResult::Cancelled)
             }
-            Request::Deselect(uris) => {
-                for uri in uris {
-                    self.selection.remove(&uri);
+            Ok(SessionSignal::ChildExited) => self.read_result(),
+            Err(_) => {
+                // All senders dropped — session is orphaned
+                if let Some(ref pidfd) = pidfd {
+                    let _ = pidfd.kill();
+                    let _ = pidfd.wait();
                 }
-                Response::Ok
+                Ok(SessionResult::Cancelled)
             }
-            Request::Clear => {
-                self.selection.clear();
-                Response::Ok
-            }
-            Request::Reset => {
-                self.selection = self.initial_selection.clone();
-                Response::Ok
-            }
-            Request::Submit => {
-                *submitted = true;
-                // Kill the child process if running (will trigger loop exit)
-                if let Some(ref mut child) = self.child {
-                    let _ = child.kill();
-                }
-                Response::Ok
-            }
-            Request::Cancel => {
-                *cancelled = true;
-                // Kill the child process if running
-                if let Some(ref mut child) = self.child {
-                    let _ = child.kill();
-                }
-                Response::Ok
-            }
-            // NoExtension is uninhabited - this arm is unreachable
-            Request::Extended(never) => match never {},
         }
     }
 
-    /// Clean up session directory
+    fn read_result(&self) -> std::io::Result<SessionResult> {
+        let entries = files::read_lines(&self.dir.join("submission"));
+        if entries.is_empty() {
+            Ok(SessionResult::Cancelled)
+        } else {
+            Ok(SessionResult::Success { entries })
+        }
+    }
+
     pub fn cleanup(&self) {
         let _ = fs::remove_dir_all(&self.dir);
     }
@@ -432,104 +287,72 @@ impl Drop for Session {
     }
 }
 
+/// Drain pending/submission into the session's submission file, then truncate pending.
+/// Only truncates pending after a successful write to avoid data loss.
+pub fn drain_pending_to(session_dir: &Path) {
+    let pending_sub = paths::pending_dir().join("submission");
+    let content = fs::read_to_string(&pending_sub).unwrap_or_default();
+    if content.trim().is_empty() {
+        return;
+    }
+
+    let session_sub = session_dir.join("submission");
+    let written = fs::OpenOptions::new()
+        .append(true)
+        .open(&session_sub)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(content.as_bytes())?;
+            f.flush()
+        });
+
+    match written {
+        Ok(()) => {
+            let _ = fs::write(&pending_sub, "");
+            let count = content.lines().filter(|l| !l.is_empty()).count();
+            info!(entries = count, "Drained pending entries to session");
+        }
+        Err(e) => {
+            tracing::warn!("Failed to drain pending to session, preserving pending: {e}");
+        }
+    }
+}
+
+/// Pop a queued submission from the submissions directory matching the portal type.
+///
+/// Submission dirs are named `<timestamp>-<portal>`. Scans in FIFO order.
+pub fn pop_queued_submission(portal: &str) -> Option<Vec<String>> {
+    let subs_dir = paths::submissions_dir();
+    let mut entries: Vec<_> = fs::read_dir(&subs_dir)
+        .ok()?
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let sub_dir = entry.path();
+        if !sub_dir.is_dir() {
+            continue;
+        }
+
+        let dir_name = entry.file_name();
+        let dir_name = dir_name.to_string_lossy();
+        let dir_portal = dir_name.split_once('-').map(|(_, p)| p).unwrap_or("any");
+
+        if dir_portal == "any" || dir_portal == portal {
+            let submission = files::read_lines(&sub_dir.join("submission"));
+            let _ = fs::remove_dir_all(&sub_dir);
+            return Some(submission);
+        }
+    }
+
+    None
+}
+
 /// Result from a session
 #[derive(Debug)]
 pub enum SessionResult {
-    Success { uris: Vec<String> },
+    Success { entries: Vec<String> },
     Cancelled,
-}
-
-/// Get the base directory for sessions (/tmp/portty/<uid>/)
-pub fn base_dir() -> PathBuf {
-    use std::os::unix::fs::MetadataExt;
-    // Get UID from /proc/self metadata
-    let uid = std::fs::metadata("/proc/self")
-        .map(|m| m.uid())
-        .unwrap_or(0);
-    PathBuf::from(format!("/tmp/portty/{}", uid))
-}
-
-/// Get directory for a specific session
-fn session_dir(id: &SessionId) -> PathBuf {
-    base_dir().join(id.as_str())
-}
-
-/// Check if a URI matches any of the provided filters
-fn matches_any_filter(uri: &str, filters: &[Filter]) -> bool {
-    // If no filters, everything matches
-    if filters.is_empty() {
-        return true;
-    }
-
-    // Extract filename from URI
-    let path = uri.strip_prefix("file://").unwrap_or(uri);
-    let filename = Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-
-    // Check if any filter matches
-    for filter in filters {
-        for pattern in &filter.patterns {
-            match pattern {
-                FilterPattern::Glob(glob) => {
-                    if glob_matches(glob, filename) {
-                        return true;
-                    }
-                }
-                FilterPattern::MimeType(_mime) => {
-                    // TODO: implement mime type matching
-                    // For now, skip mime type filters
-                }
-            }
-        }
-    }
-
-    false
-}
-
-/// Simple glob pattern matching (supports * and ?)
-fn glob_matches(pattern: &str, text: &str) -> bool {
-    let pattern = pattern.to_lowercase();
-    let text = text.to_lowercase();
-
-    let mut p_chars = pattern.chars().peekable();
-    let mut t_chars = text.chars().peekable();
-
-    while let Some(pc) = p_chars.next() {
-        match pc {
-            '*' => {
-                // * matches zero or more characters
-                if p_chars.peek().is_none() {
-                    // Trailing * matches everything
-                    return true;
-                }
-                // Try matching rest of pattern at each position
-                let rest_pattern: String = p_chars.collect();
-                let mut remaining: String = t_chars.collect();
-                while !remaining.is_empty() {
-                    if glob_matches(&rest_pattern, &remaining) {
-                        return true;
-                    }
-                    remaining = remaining.chars().skip(1).collect();
-                }
-                return glob_matches(&rest_pattern, "");
-            }
-            '?' => {
-                // ? matches exactly one character
-                if t_chars.next().is_none() {
-                    return false;
-                }
-            }
-            c => {
-                // Literal character match
-                if t_chars.next() != Some(c) {
-                    return false;
-                }
-            }
-        }
-    }
-
-    // Pattern consumed, text should also be consumed
-    t_chars.next().is_none()
 }

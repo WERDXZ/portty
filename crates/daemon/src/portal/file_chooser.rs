@@ -1,208 +1,48 @@
+use std::path::Path;
 use std::sync::{Arc, RwLock};
-use std::thread;
 
-use futures_lite::future::yield_now;
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
-use crate::config::{Config, FileChooserOp};
-use crate::daemon_socket::{DaemonState, RegisteredSession};
-use crate::session::{Session, SessionResult};
-use portty_ipc::PortalType;
-use portty_ipc::ipc::context::PortalContext;
-use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SelectionMode, SessionOptions};
-use portty_ipc::portal::file_chooser::{
+use crate::config::Config;
+use crate::daemon_socket::DaemonState;
+use crate::dbus::file_chooser::{
     FileChooserError, FileChooserHandler, FileChooserResult, FileFilter,
     FilterPattern as PortalFilterPattern, OpenFileOptions, SaveFileOptions, SaveFilesOptions,
 };
-use portty_ipc::queue::QueuedCommand;
 
-/// File chooser handler that spawns terminals
-pub struct TtyFileChooser {
-    config: Arc<Config>,
-    state: Arc<RwLock<DaemonState>>,
-}
+pub use libportty::portal::file_chooser::{Filter, FilterPattern, SelectionMode, SessionOptions};
 
-impl TtyFileChooser {
-    pub fn new(config: Arc<Config>, state: Arc<RwLock<DaemonState>>) -> Self {
-        debug!("FileChooser initialized");
-        Self { config, state }
-    }
-
-    async fn run_session(
-        &self,
-        op: FileChooserOp,
-        options: SessionOptions,
-    ) -> Result<FileChooserResult, FileChooserError> {
-        let portal = PortalType::FileChooser;
-
-        // Check for queued submission first
-        {
-            let mut st = self.state.write().unwrap();
-            if let Some(submission) = st.queue.pop_for_portal(portal) {
-                info!(
-                    ?op,
-                    commands = submission.commands.len(),
-                    "Found queued submission, auto-applying"
-                );
-
-                // Apply queued commands to get URIs
-                let mut selection: Vec<String> = Vec::new();
-                for cmd in submission.commands {
-                    match cmd {
-                        QueuedCommand::Select(uris) => {
-                            for uri in uris {
-                                if !selection.contains(&uri) {
-                                    selection.push(uri);
-                                }
-                            }
-                        }
-                        QueuedCommand::Deselect(uris) => {
-                            selection.retain(|u| !uris.contains(u));
-                        }
-                        QueuedCommand::Clear => {
-                            selection.clear();
-                        }
-                    }
+/// Build initial submission entries from file chooser options
+fn build_initial_entries(options: &SessionOptions) -> Vec<String> {
+    let mut entries = Vec::new();
+    if let Some(ref folder) = options.current_folder {
+        match options.mode {
+            SelectionMode::SaveMultiple if !options.candidates.is_empty() => {
+                entries.push(format!("file://{}", folder));
+            }
+            SelectionMode::Save => {
+                if let Some(name) = options.candidates.first() {
+                    let path = Path::new(folder).join(name);
+                    entries.push(format!("file://{}", path.display()));
                 }
-
-                if selection.is_empty() {
-                    info!("Queued submission resulted in empty selection, cancelling");
-                    return Err(FileChooserError::Cancelled);
-                }
-
-                info!(?selection, "Queued submission applied");
-                return Ok(FileChooserResult::new().uris(selection));
             }
-        }
-
-        // Get operation-specific config
-        let exec = self.config.file_chooser_exec(op).map(String::from);
-        let bin = self.config.file_chooser_bin(op);
-
-        let headless = exec.is_none();
-        if headless {
-            info!(
-                ?op,
-                "Starting headless session (use `portty` CLI to interact)"
-            );
-        } else {
-            debug!(?exec, ?op, "Creating session");
-        }
-
-        // Store files for SaveFiles post-processing
-        let save_files = if matches!(options.mode, SelectionMode::SaveMultiple) {
-            options.candidates.clone()
-        } else {
-            Vec::new()
-        };
-
-        let context = PortalContext::FileChooser(options);
-        let mut session = Session::new(portal.as_str(), context, &bin)
-            .map_err(|e| FileChooserError::Other(format!("failed to create session: {e}")))?;
-
-        // Register session and transfer any pending commands
-        let session_id = session.id().to_string();
-        {
-            let mut st = self.state.write().unwrap();
-            st.sessions.register(RegisteredSession {
-                id: session_id.clone(),
-                portal,
-                title: session.title().map(String::from),
-                created: session.created(),
-                socket_path: session.socket_path().to_path_buf(),
-            });
-
-            // Transfer pending commands to session (user can still review/modify)
-            if !st.queue.pending.is_empty() {
-                let pending = std::mem::take(&mut st.queue.pending);
-                info!(
-                    commands = pending.len(),
-                    "Transferring pending commands to session"
-                );
-                session.apply_pending(pending);
-            }
-        }
-
-        // Spawn process (terminal or auto-confirm command like "submit")
-        if let Some(ref exec) = exec {
-            session
-                .spawn(exec, &format!("{} - {}", portal.as_str(), op.as_str()))
-                .map_err(|e| FileChooserError::Other(format!("failed to spawn: {e}")))?;
-        }
-
-        // Run session in background thread (allows concurrent sessions)
-        let handle = thread::spawn(move || session.run());
-
-        // Poll until thread completes
-        loop {
-            if handle.is_finished() {
-                break;
-            }
-            yield_now().await;
-        }
-
-        let result = handle
-            .join()
-            .map_err(|_| FileChooserError::Other("session thread panicked".to_string()))?
-            .map_err(|e| FileChooserError::Other(format!("session failed: {e}")))?;
-
-        // Unregister session after completion
-        {
-            let mut st = self.state.write().unwrap();
-            st.sessions.unregister(&session_id);
-        }
-
-        match result {
-            SessionResult::Success { uris } => {
-                // For SaveFiles, construct URIs from selected folder + filenames
-                let final_uris = if !save_files.is_empty() {
-                    build_save_files_uris(&uris, &save_files)
-                } else {
-                    uris
-                };
-
-                info!(?final_uris, "Session completed successfully");
-                Ok(FileChooserResult::new().uris(final_uris))
-            }
-            SessionResult::Cancelled => {
-                info!("Session cancelled");
-                Err(FileChooserError::Cancelled)
-            }
+            _ => {}
         }
     }
+    entries
 }
 
-/// Build URIs for SaveFiles by appending filenames to the selected folder
-fn build_save_files_uris(selected: &[String], files: &[String]) -> Vec<String> {
-    // Get the folder from selection (use first one, resolve to parent if it's a file)
-    let folder = selected.first().map(|uri| {
-        // Strip file:// prefix if present
-        let path = uri.strip_prefix("file://").unwrap_or(uri);
-        let path = std::path::Path::new(path);
-
-        // If it's a file, use parent directory
-        if path.is_file() {
-            path.parent().unwrap_or(path).to_path_buf()
-        } else {
-            path.to_path_buf()
-        }
-    });
-
-    let Some(folder) = folder else {
-        return Vec::new();
+/// Convert a null-terminated D-Bus byte array to a String, stripping trailing nulls.
+fn bytes_to_string(b: &[u8]) -> String {
+    let b = if b.last() == Some(&0) {
+        &b[..b.len() - 1]
+    } else {
+        b
     };
-
-    // Append each filename to the folder
-    files
-        .iter()
-        .map(|name| {
-            let full_path = folder.join(name);
-            format!("file://{}", full_path.display())
-        })
-        .collect()
+    String::from_utf8_lossy(b).into_owned()
 }
 
-/// Convert D-Bus filters to IPC filters
+/// Convert D-Bus filters to our filter type
 fn convert_filters(filters: &[FileFilter]) -> Vec<Filter> {
     filters
         .iter()
@@ -217,6 +57,18 @@ fn convert_filters(filters: &[FileFilter]) -> Vec<Filter> {
                 .collect(),
         })
         .collect()
+}
+
+/// File chooser handler that spawns terminals
+pub struct TtyFileChooser {
+    config: Arc<Config>,
+    state: Arc<RwLock<DaemonState>>,
+}
+
+impl TtyFileChooser {
+    pub fn new(config: Arc<Config>, state: Arc<RwLock<DaemonState>>) -> Self {
+        Self { config, state }
+    }
 }
 
 impl FileChooserHandler for TtyFileChooser {
@@ -236,21 +88,33 @@ impl FileChooserHandler for TtyFileChooser {
         );
 
         let session_options = SessionOptions {
-            title,
+            title: title.clone(),
             mode: SelectionMode::Pick {
                 multiple: options.multiple().unwrap_or(false),
                 directory: options.directory().unwrap_or(false),
             },
-            current_folder: options
-                .current_folder()
-                .map(|b| String::from_utf8_lossy(b).into_owned()),
+            current_folder: options.current_folder().map(bytes_to_string),
             candidates: vec![],
             filters: convert_filters(options.filters()),
             current_filter: None,
         };
 
-        self.run_session(FileChooserOp::OpenFile, session_options)
-            .await
+        let initial_entries = build_initial_entries(&session_options);
+        let options_json = serde_json::to_value(&session_options)
+            .map_err(|e| FileChooserError::Other(format!("failed to serialize options: {e}")))?;
+
+        let entries = super::run_session(
+            "file-chooser",
+            "open-file",
+            &options_json,
+            &initial_entries,
+            Some(&title),
+            &self.config,
+            &self.state,
+        )
+        .await?;
+
+        Ok(FileChooserResult::new().uris(entries))
     }
 
     #[instrument(skip(self, _parent_window, options))]
@@ -265,18 +129,34 @@ impl FileChooserHandler for TtyFileChooser {
         info!(current_name = ?options.current_name(), "SaveFile request");
 
         let session_options = SessionOptions {
-            title,
+            title: title.clone(),
             mode: SelectionMode::Save,
-            current_folder: options
-                .current_folder()
-                .map(|b| String::from_utf8_lossy(b).into_owned()),
-            candidates: options.current_name().map(String::from).into_iter().collect(),
+            current_folder: options.current_folder().map(bytes_to_string),
+            candidates: options
+                .current_name()
+                .map(String::from)
+                .into_iter()
+                .collect(),
             filters: convert_filters(options.filters()),
             current_filter: None,
         };
 
-        self.run_session(FileChooserOp::SaveFile, session_options)
-            .await
+        let initial_entries = build_initial_entries(&session_options);
+        let options_json = serde_json::to_value(&session_options)
+            .map_err(|e| FileChooserError::Other(format!("failed to serialize options: {e}")))?;
+
+        let entries = super::run_session(
+            "file-chooser",
+            "save-file",
+            &options_json,
+            &initial_entries,
+            Some(&title),
+            &self.config,
+            &self.state,
+        )
+        .await?;
+
+        Ok(FileChooserResult::new().uris(entries))
     }
 
     #[instrument(skip(self, _parent_window, options))]
@@ -288,35 +168,34 @@ impl FileChooserHandler for TtyFileChooser {
         title: String,
         options: SaveFilesOptions,
     ) -> Result<FileChooserResult, FileChooserError> {
-        // Extract filenames from the files option (nul-terminated byte arrays)
-        let files: Vec<String> = options
-            .files()
-            .iter()
-            .map(|f| {
-                // Remove trailing nul byte if present
-                let bytes = if f.last() == Some(&0) {
-                    &f[..f.len() - 1]
-                } else {
-                    f.as_slice()
-                };
-                String::from_utf8_lossy(bytes).into_owned()
-            })
-            .collect();
+        let files: Vec<String> = options.files().iter().map(|f| bytes_to_string(f)).collect();
 
         info!(?files, "SaveFiles request");
 
         let session_options = SessionOptions {
-            title,
+            title: title.clone(),
             mode: SelectionMode::SaveMultiple,
-            current_folder: options
-                .current_folder()
-                .map(|b| String::from_utf8_lossy(b).into_owned()),
-            candidates: files,
+            current_folder: options.current_folder().map(bytes_to_string),
+            candidates: files.clone(),
             filters: Vec::new(),
             current_filter: None,
         };
 
-        self.run_session(FileChooserOp::SaveFiles, session_options)
-            .await
+        let initial_entries = build_initial_entries(&session_options);
+        let options_json = serde_json::to_value(&session_options)
+            .map_err(|e| FileChooserError::Other(format!("failed to serialize options: {e}")))?;
+
+        let entries = super::run_session(
+            "file-chooser",
+            "save-files",
+            &options_json,
+            &initial_entries,
+            Some(&title),
+            &self.config,
+            &self.state,
+        )
+        .await?;
+
+        Ok(FileChooserResult::new().uris(entries))
     }
 }

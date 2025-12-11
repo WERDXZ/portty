@@ -1,0 +1,16 @@
+[package]
+name = "libportty"
+version = "0.2.0"
+edition = "2024"
+
+[features]
+default = ["portal-file-chooser", "portal-screenshot"]
+portal = ["dep:serde_json"]
+portal-file-chooser = ["portal", "dep:url"]
+portal-screenshot = ["portal"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+thiserror = "2"
+url = { version = "2", optional = true }

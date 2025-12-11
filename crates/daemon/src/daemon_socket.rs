@@ -1,82 +1,113 @@
-//! Daemon control socket for CLI communication
+//! Daemon control socket and FIFO for CLI communication
 //!
 //! Listens on /tmp/portty/<uid>/daemon.sock for CLI requests.
-//! Owns the submission queue and session registry.
+//! Listens on /tmp/portty/<uid>/daemon.ctl for fire-and-forget commands.
+//! Owns the session registry. Data operations (edit, clear) are file-based (CLI handles directly).
+//! This socket handles control commands: submit, cancel, verify, reset, list.
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufRead, BufReader};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-use portty_ipc::ipc::{read_message, write_message, IpcError};
-use portty_ipc::queue::{QueuedCommand, SubmissionQueue};
-use portty_ipc::{
-    DaemonExtension, DaemonRequest, DaemonResponse, DaemonResponseExtension, PortalType,
-    QueueStatusInfo, Request, Response, SessionInfo, SessionRequest, SessionResponse,
-};
-use thiserror::Error;
+use libportty::codec::{read_request, write_response};
+use libportty::{Request, Response, SessionInfo};
+use libportty::{files, paths};
 use tracing::{debug, info, warn};
 
-use crate::session::base_dir;
-
-/// Error type for daemon socket operations
-#[derive(Debug, Error)]
-pub enum DaemonError {
-    #[error("IPC error: {0}")]
-    Ipc(#[from] IpcError),
-    #[error("session connection failed: {0}")]
-    SessionConnect(#[source] std::io::Error),
-    #[error("session error: {0}")]
-    SessionError(String),
-    #[error("unexpected response from session")]
-    UnexpectedResponse,
-}
+use crate::portal;
+use crate::session::{Session, SessionControl, drain_pending_to};
 
 /// Registry of active portal sessions
-///
-/// Maps session IDs to their metadata. Used by the daemon to:
-/// - Route CLI commands to the correct session
-/// - List active sessions for the user
-/// - Auto-select when only one session is active
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
     sessions: HashMap<String, RegisteredSession>,
 }
 
 /// Metadata about a registered session
-///
-/// Stored in the [`SessionRegistry`] for session lookup and management.
-#[derive(Debug, Clone)]
 pub struct RegisteredSession {
-    /// Unique session identifier
     pub id: String,
-    /// Type of portal (FileChooser, etc.)
-    pub portal: PortalType,
-    /// Human-readable title from portal request
+    pub portal: String,
+    pub operation: String,
     pub title: Option<String>,
-    /// Unix timestamp when session was created
     pub created: u64,
-    /// Path to the session's Unix socket
-    pub socket_path: PathBuf,
+    pub dir: PathBuf,
+    pub control: Arc<SessionControl>,
+    pub initial_entries: Vec<String>,
+}
+
+impl std::fmt::Debug for RegisteredSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisteredSession")
+            .field("id", &self.id)
+            .field("portal", &self.portal)
+            .field("operation", &self.operation)
+            .field("title", &self.title)
+            .field("created", &self.created)
+            .field("dir", &self.dir)
+            .finish()
+    }
 }
 
 impl From<&RegisteredSession> for SessionInfo {
     fn from(s: &RegisteredSession) -> Self {
         SessionInfo {
             id: s.id.clone(),
-            portal: s.portal,
+            portal: s.portal.clone(),
+            operation: s.operation.clone(),
             title: s.title.clone(),
             created: s.created,
-            socket_path: s.socket_path.to_string_lossy().into_owned(),
+            dir: s.dir.to_string_lossy().into_owned(),
         }
     }
 }
 
 impl SessionRegistry {
-    pub fn register(&mut self, session: RegisteredSession) {
-        info!(id = %session.id, portal = %session.portal, "Registering session");
+    /// Create a new session and register it atomically.
+    ///
+    /// Returns the session (for spawning + running) and the session ID.
+    pub fn create_session(
+        &mut self,
+        portal: &str,
+        operation: &str,
+        options: &serde_json::Value,
+        initial_entries: &[String],
+        custom_bins: &HashMap<String, String>,
+        title: Option<&str>,
+    ) -> std::io::Result<Session> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let control = SessionControl::new(sender.clone());
+
+        let session = Session::new(
+            portal,
+            operation,
+            options,
+            initial_entries,
+            custom_bins,
+            sender,
+            receiver,
+        )?;
+
+        self.register(RegisteredSession {
+            id: session.id().to_string(),
+            portal: portal.to_string(),
+            operation: operation.to_string(),
+            title: title.map(String::from),
+            created: session.created(),
+            dir: session.dir().to_path_buf(),
+            control: Arc::new(control),
+            initial_entries: initial_entries.to_vec(),
+        });
+
+        Ok(session)
+    }
+
+    fn register(&mut self, session: RegisteredSession) {
+        info!(id = %session.id, portal = %session.portal, operation = %session.operation, "Registering session");
         self.sessions.insert(session.id.clone(), session);
     }
 
@@ -92,297 +123,286 @@ impl SessionRegistry {
     pub fn iter(&self) -> impl Iterator<Item = &RegisteredSession> {
         self.sessions.values()
     }
-
-    pub fn len(&self) -> usize {
-        self.sessions.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.sessions.is_empty()
-    }
 }
 
 /// Shared daemon state
-///
-/// Thread-safe state shared between the D-Bus portal handlers and the
-/// daemon control socket. Protected by `RwLock` for concurrent access.
 #[derive(Default)]
 pub struct DaemonState {
-    /// Registry of active portal sessions
     pub sessions: SessionRegistry,
-    /// Queue of pending commands and submissions
-    pub queue: SubmissionQueue,
 }
 
 impl DaemonState {
-    /// Create a new daemon state with empty session registry and queue
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 /// Daemon control socket server
-///
-/// Listens on `/tmp/portty/<uid>/daemon.sock` for CLI commands.
-/// Handles session management, queue operations, and forwards
-/// session commands to the appropriate session sockets.
 pub struct DaemonSocket {
     state: Arc<RwLock<DaemonState>>,
-    listener: Option<UnixListener>,
+    listener: UnixListener,
 }
 
 impl DaemonSocket {
-    /// Create and bind the daemon socket
     pub fn new(state: Arc<RwLock<DaemonState>>) -> std::io::Result<Self> {
-        let base = base_dir();
-        fs::create_dir_all(&base)?;
+        paths::ensure_base_dir()?;
 
-        let sock_path = base.join("daemon.sock");
-
-        // Remove stale socket if exists
+        let sock_path = paths::daemon_socket_path();
         let _ = fs::remove_file(&sock_path);
 
         let listener = UnixListener::bind(&sock_path)?;
         info!(?sock_path, "Daemon socket listening");
 
-        Ok(Self {
-            state,
-            listener: Some(listener),
-        })
+        Ok(Self { state, listener })
     }
 
-    /// Run the daemon socket server in a background thread
-    pub fn spawn(mut self) -> thread::JoinHandle<()> {
+    pub fn spawn(self) -> thread::JoinHandle<()> {
         thread::spawn(move || {
-            if let Some(listener) = self.listener.take() {
-                self.run(listener);
+            for stream in self.listener.incoming() {
+                match stream {
+                    Ok(stream) => {
+                        let state = Arc::clone(&self.state);
+                        thread::spawn(move || {
+                            if let Err(e) = handle_connection(stream, state) {
+                                warn!("Connection error: {e}");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        warn!("Accept error: {e}");
+                    }
+                }
             }
         })
     }
+}
 
-    fn run(&self, listener: UnixListener) {
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    let state = Arc::clone(&self.state);
-                    thread::spawn(move || {
-                        if let Err(e) = handle_connection(stream, state) {
-                            warn!("Connection error: {e}");
-                        }
-                    });
-                }
+/// Daemon control FIFO for fire-and-forget commands
+pub struct DaemonCtl {
+    state: Arc<RwLock<DaemonState>>,
+}
+
+impl DaemonCtl {
+    pub fn new(state: Arc<RwLock<DaemonState>>) -> std::io::Result<Self> {
+        paths::ensure_base_dir()?;
+
+        let ctl_path = paths::daemon_ctl_path();
+        let _ = fs::remove_file(&ctl_path);
+
+        std::os::unix::fs::mkfifo(&ctl_path, std::fs::Permissions::from_mode(0o600))?;
+
+        info!(?ctl_path, "Daemon FIFO created");
+
+        Ok(Self { state })
+    }
+
+    pub fn spawn(self) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let ctl_path = paths::daemon_ctl_path();
+
+            // Open with read+write to prevent EOF when all writers close
+            let file = match fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&ctl_path)
+            {
+                Ok(f) => f,
                 Err(e) => {
-                    warn!("Accept error: {e}");
+                    warn!("Failed to open FIFO: {e}");
+                    return;
+                }
+            };
+            let reader = BufReader::new(file);
+
+            info!("Daemon FIFO listening");
+
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => {
+                        let line = line.trim().to_string();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        match Request::decode(&line) {
+                            Ok(req) => {
+                                debug!(?req, "FIFO request");
+                                let resp = handle_request(req, &self.state);
+                                debug!(?resp, "FIFO response (discarded)");
+                            }
+                            Err(e) => {
+                                warn!("FIFO parse error: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("FIFO read error: {e}");
+                        break;
+                    }
                 }
             }
-        }
+        })
     }
 }
 
 fn handle_connection(
-    mut stream: UnixStream,
+    stream: UnixStream,
     state: Arc<RwLock<DaemonState>>,
-) -> Result<(), DaemonError> {
-    let req: DaemonRequest = read_message(&mut stream)?;
+) -> Result<(), libportty::codec::IpcError> {
+    let mut reader = BufReader::new(&stream);
+    let mut writer = &stream;
+
+    let req = read_request(&mut reader)?;
     debug!(?req, "Received daemon request");
 
     let resp = handle_request(req, &state);
-    write_message(&mut stream, &resp)?;
+    write_response(&mut writer, &resp)?;
 
     Ok(())
 }
 
-fn handle_request(req: DaemonRequest, state: &Arc<RwLock<DaemonState>>) -> DaemonResponse {
+fn handle_request(req: Request, state: &Arc<RwLock<DaemonState>>) -> Response {
     match req {
-        // === Base commands: route to active session or queue ===
-        Request::Select(uris) => {
-            route_session_command(state, Request::Select(uris))
-        }
-        Request::Deselect(uris) => {
-            route_session_command(state, Request::Deselect(uris))
-        }
-        Request::Clear => {
-            route_session_command(state, Request::Clear)
-        }
-        Request::Submit => {
-            route_session_command(state, Request::Submit)
-        }
-        Request::Cancel => {
-            route_session_command(state, Request::Cancel)
-        }
-        Request::GetOptions => {
-            route_session_command(state, Request::GetOptions)
-        }
-        Request::GetSelection => {
-            route_session_command(state, Request::GetSelection)
-        }
-        Request::Reset => {
-            route_session_command(state, Request::Reset)
-        }
-
-        // === Daemon-specific extensions ===
-        Request::Extended(ext) => handle_daemon_extension(ext, state),
+        Request::Submit { session_id } => handle_submit(session_id, state),
+        Request::Cancel { session_id } => handle_cancel(session_id, state),
+        Request::Verify { session_id } => handle_verify(session_id, state),
+        Request::Reset { session_id } => handle_reset(session_id, state),
+        Request::List => handle_list(state),
     }
 }
 
-/// Route a session command to the active session
-///
-/// When multiple sessions are active, uses the earliest (oldest) session.
-/// This allows concurrent sessions while providing sensible default behavior.
-fn route_session_command(
-    state: &Arc<RwLock<DaemonState>>,
-    req: SessionRequest,
-) -> DaemonResponse {
-    let st = state.read().unwrap();
+/// Submit: resolve session (by id or earliest), drain pending, signal submitted.
+/// No session -> queue to submissions dir.
+fn handle_submit(session_id: Option<String>, state: &Arc<RwLock<DaemonState>>) -> Response {
+    let st = state.read().unwrap_or_else(|e| e.into_inner());
 
-    if st.sessions.is_empty() {
-        return Response::Error("No active sessions".to_string());
+    let session = resolve_session(&st, session_id.as_deref());
+
+    if let Some(session) = session {
+        drain_pending_to(&session.dir);
+        session.control.submit();
+        info!(session_id = %session.id, "Signalled submit");
+        Response::Ok
+    } else {
+        drop(st);
+        move_pending_to_submissions()
     }
+}
 
-    // Select earliest session (by creation time)
-    let session = st
-        .sessions
-        .iter()
-        .min_by_key(|s| s.created)
-        .cloned();
+/// Cancel: resolve session, signal cancelled. No session -> clear pending.
+fn handle_cancel(session_id: Option<String>, state: &Arc<RwLock<DaemonState>>) -> Response {
+    let st = state.read().unwrap_or_else(|e| e.into_inner());
 
-    let session = match session {
+    let session = resolve_session(&st, session_id.as_deref());
+
+    if let Some(session) = session {
+        session.control.cancel();
+        info!(session_id = %session.id, "Signalled cancel");
+        Response::Ok
+    } else {
+        drop(st);
+        let pending_sub = paths::pending_dir().join("submission");
+        let _ = fs::write(&pending_sub, "");
+        Response::Ok
+    }
+}
+
+/// Verify: resolve session, read submission + options.json, validate.
+fn handle_verify(session_id: Option<String>, state: &Arc<RwLock<DaemonState>>) -> Response {
+    let st = state.read().unwrap_or_else(|e| e.into_inner());
+
+    let session = match resolve_session(&st, session_id.as_deref()) {
         Some(s) => s,
-        None => return Response::Error("No active sessions".to_string()),
+        None => return Response::Error("No active session to verify".to_string()),
     };
 
-    drop(st); // Release lock before socket operations
+    let session_dir = session.dir.clone();
+    let portal = session.portal.clone();
+    let operation = session.operation.clone();
+    drop(st);
 
-    // Forward to session
-    match send_to_session(&session.socket_path, &req) {
-        Ok(resp) => resp.into(), // Convert SessionResponse to DaemonResponse
-        Err(e) => Response::Error(e.to_string()),
+    // Read submission
+    let entries = files::read_lines(&session_dir.join("submission"));
+
+    // Read options.json
+    let options: serde_json::Value = match fs::read_to_string(session_dir.join("options.json")) {
+        Ok(json) => match serde_json::from_str(&json) {
+            Ok(v) => v,
+            Err(e) => return Response::Error(format!("Failed to parse options: {e}")),
+        },
+        Err(e) => return Response::Error(format!("Failed to read options: {e}")),
+    };
+
+    match portal::validate(&portal, &operation, &entries, &options) {
+        Ok(_) => Response::Ok,
+        Err(msg) => Response::Error(msg),
     }
 }
 
-/// Handle daemon-specific extension commands
-fn handle_daemon_extension(
-    ext: DaemonExtension,
-    state: &Arc<RwLock<DaemonState>>,
-) -> DaemonResponse {
-    match ext {
-        DaemonExtension::ListSessions => {
-            let st = state.read().unwrap();
-            let sessions = st.sessions.iter().map(SessionInfo::from).collect();
-            Response::Extended(DaemonResponseExtension::Sessions(sessions))
-        }
+/// Reset: resolve session, rewrite submission with initial entries.
+fn handle_reset(session_id: Option<String>, state: &Arc<RwLock<DaemonState>>) -> Response {
+    let st = state.read().unwrap_or_else(|e| e.into_inner());
 
-        DaemonExtension::GetSession(id) => {
-            let st = state.read().unwrap();
-            match st.sessions.get(&id) {
-                Some(s) => Response::Extended(DaemonResponseExtension::Session(s.into())),
-                None => Response::Error(format!("Session not found: {id}")),
-            }
-        }
+    let session = match resolve_session(&st, session_id.as_deref()) {
+        Some(s) => s,
+        None => return Response::Error("No active session to reset".to_string()),
+    };
 
-        DaemonExtension::QueuePush(cmd) => {
-            let mut st = state.write().unwrap();
-            st.queue.push_command(cmd);
+    let sub_path = session.dir.join("submission");
+    let entries = session.initial_entries.clone();
+    let sid = session.id.clone();
+    drop(st);
+
+    match files::write_lines(&sub_path, &entries) {
+        Ok(()) => {
+            info!(session_id = %sid, "Reset submission to initial state");
             Response::Ok
         }
-
-        DaemonExtension::QueueSubmit { portal } => {
-            let mut st = state.write().unwrap();
-            if st.queue.pending.is_empty() {
-                return Response::Error("No pending commands to submit".to_string());
-            }
-
-            // Find active session matching portal type
-            let matching_session = st.sessions.iter().find(|s| {
-                portal.is_none_or(|p| s.portal == p)
-            }).cloned();
-
-            if let Some(session) = matching_session {
-                // Try to apply commands to active session immediately
-                let pending = std::mem::take(&mut st.queue.pending);
-                drop(st); // Release lock before socket operations
-
-                match apply_to_session(&session.socket_path, &pending) {
-                    Ok(()) => {
-                        info!(
-                            session_id = %session.id,
-                            commands = pending.len(),
-                            "Applied queued commands to active session"
-                        );
-                        Response::Ok
-                    }
-                    Err(e) => {
-                        // Failed to apply - restore pending and queue for later
-                        warn!("Failed to apply to session: {e}");
-                        let mut st = state.write().unwrap();
-                        st.queue.pending = pending;
-                        st.queue.submit(portal);
-                        Response::Ok
-                    }
-                }
-            } else {
-                // No active session - queue for later
-                st.queue.submit(portal);
-                Response::Ok
-            }
-        }
-
-        DaemonExtension::QueueClearPending => {
-            let mut st = state.write().unwrap();
-            st.queue.clear_pending();
-            Response::Ok
-        }
-
-        DaemonExtension::QueueClearAll => {
-            let mut st = state.write().unwrap();
-            st.queue.clear_all();
-            Response::Ok
-        }
-
-        DaemonExtension::QueueStatus => {
-            let st = state.read().unwrap();
-            Response::Extended(DaemonResponseExtension::QueueStatus(QueueStatusInfo {
-                pending_count: st.queue.pending.len(),
-                pending: st.queue.pending.clone(),
-                submissions_count: st.queue.submissions.len(),
-                submissions: st.queue.submissions.clone(),
-            }))
-        }
+        Err(e) => Response::Error(format!("Failed to reset: {e}")),
     }
 }
 
-/// Apply queued commands to a session and submit
-fn apply_to_session(socket_path: &Path, commands: &[QueuedCommand]) -> Result<(), DaemonError> {
-    // Send each command
-    for cmd in commands {
-        let req: SessionRequest = match cmd {
-            QueuedCommand::Select(uris) => Request::Select(uris.clone()),
-            QueuedCommand::Deselect(uris) => Request::Deselect(uris.clone()),
-            QueuedCommand::Clear => Request::Clear,
-        };
+/// List all active sessions.
+fn handle_list(state: &Arc<RwLock<DaemonState>>) -> Response {
+    let st = state.read().unwrap_or_else(|e| e.into_inner());
+    let sessions = st.sessions.iter().map(SessionInfo::from).collect();
+    Response::Sessions(sessions)
+}
 
-        let resp = send_to_session(socket_path, &req)?;
-        match resp {
-            Response::Ok => {}
-            Response::Error(e) => return Err(DaemonError::SessionError(e)),
-            _ => return Err(DaemonError::UnexpectedResponse),
-        }
-    }
-
-    // Send submit
-    let resp = send_to_session(socket_path, &Request::Submit)?;
-    match resp {
-        Response::Ok => Ok(()),
-        Response::Error(e) => Err(DaemonError::SessionError(e)),
-        _ => Err(DaemonError::UnexpectedResponse),
+/// Resolve a session: by ID, or earliest if None.
+fn resolve_session<'a>(
+    state: &'a DaemonState,
+    session_id: Option<&str>,
+) -> Option<&'a RegisteredSession> {
+    match session_id {
+        Some(id) => state.sessions.get(id),
+        None => state.sessions.iter().min_by_key(|s| s.created),
     }
 }
 
-/// Send a request to session socket
-fn send_to_session(socket_path: &Path, req: &SessionRequest) -> Result<SessionResponse, DaemonError> {
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(DaemonError::SessionConnect)?;
+/// Move pending/submission -> submissions/<ts>-any/submission
+fn move_pending_to_submissions() -> Response {
+    let pending_sub = paths::pending_dir().join("submission");
+    let entries = files::read_lines(&pending_sub);
 
-    write_message(&mut stream, req)?;
-    read_message(&mut stream).map_err(DaemonError::from)
+    if entries.is_empty() {
+        return Response::Error("No pending entries to submit".to_string());
+    }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    let sub_dir = paths::submissions_dir().join(format!("{}-any", ts));
+    if let Err(e) = fs::create_dir_all(&sub_dir) {
+        return Response::Error(format!("Failed to create submission dir: {e}"));
+    }
+
+    if let Err(e) = files::write_lines(&sub_dir.join("submission"), &entries) {
+        return Response::Error(format!("Failed to write submission: {e}"));
+    }
+
+    let _ = fs::write(&pending_sub, "");
+    info!(entries = entries.len(), "Created submission");
+    Response::Ok
 }

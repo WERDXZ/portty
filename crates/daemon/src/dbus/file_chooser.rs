@@ -1,7 +1,9 @@
+#![allow(dead_code)]
+
 use futures_util::future::abortable;
 use zbus::zvariant::{DeserializeDict, ObjectPath, SerializeDict, Type};
 
-use crate::request::Request;
+use crate::dbus::request::Request;
 
 /// File filter: (name, patterns)
 /// D-Bus signature: (sa(us))

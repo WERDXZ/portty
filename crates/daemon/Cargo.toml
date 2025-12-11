@@ -8,10 +8,14 @@ name = "porttyd"
 path = "src/main.rs"
 
 [dependencies]
-portty-ipc = { path = "../ipc" }
+libportty = { path = "../lib" }
 zbus = "5.12.0"
+zvariant = { version = "5.8.0", features = ["option-as-array"] }
+futures-util = "0.3"
+blocking = "1"
 futures-lite = "2"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 dirs = "6"
 tracing = "0.1"
