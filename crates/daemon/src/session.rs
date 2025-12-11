@@ -5,7 +5,8 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SelectionMode, SessionOptions};
+use portty_ipc::ipc::context::PortalContext;
+use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SelectionMode};
 use portty_ipc::ipc::{read_message, write_message};
 use portty_ipc::queue::QueuedCommand;
 use portty_ipc::{SessionRequest, SessionResponse};
@@ -17,6 +18,7 @@ fn default_commands(portal: &str) -> &'static [(&'static str, &'static str)] {
     match portal {
         // "sel" shim avoids conflict with POSIX `select` builtin
         "file-chooser" => &[("sel", "select"), ("desel", "deselect"), ("reset", "reset"), ("submit", "submit"), ("cancel", "cancel"), ("info", "info")],
+        "screenshot" => &[("sel", "select"), ("submit", "submit"), ("cancel", "cancel"), ("info", "info")],
         _ => &[],
     }
 }
@@ -72,7 +74,7 @@ pub struct Session {
     socket_path: PathBuf,
     child: Option<Child>,
     listener: Option<UnixListener>,
-    options: SessionOptions,
+    context: PortalContext,
     /// Selected URIs (HashSet for O(1) lookups and automatic deduplication)
     selection: HashSet<String>,
     /// Initial selection (for reset)
@@ -86,7 +88,7 @@ impl Session {
     /// Create a new session with its directory
     pub fn new(
         portal: &str,
-        options: SessionOptions,
+        context: PortalContext,
         custom_bins: &HashMap<String, String>,
     ) -> std::io::Result<Self> {
         let id = SessionId::new();
@@ -137,24 +139,32 @@ impl Session {
             .unwrap_or_default()
             .as_secs();
 
-        let single_select = matches!(options.mode, SelectionMode::Save);
-
-        // Pre-populate selection based on mode
-        let mut selection = HashSet::new();
-        if let Some(ref folder) = options.current_folder {
-            match options.mode {
-                SelectionMode::SaveMultiple if !options.candidates.is_empty() => {
-                    selection.insert(format!("file://{}", folder));
-                }
-                SelectionMode::Save => {
-                    if let Some(name) = options.candidates.first() {
-                        let path = Path::new(folder).join(name);
-                        selection.insert(format!("file://{}", path.display()));
+        // Derive single_select and initial selection from context
+        let (single_select, selection) = match &context {
+            PortalContext::FileChooser(opts) => {
+                let single = matches!(opts.mode, SelectionMode::Save);
+                let mut sel = HashSet::new();
+                if let Some(ref folder) = opts.current_folder {
+                    match opts.mode {
+                        SelectionMode::SaveMultiple if !opts.candidates.is_empty() => {
+                            sel.insert(format!("file://{}", folder));
+                        }
+                        SelectionMode::Save => {
+                            if let Some(name) = opts.candidates.first() {
+                                let path = Path::new(folder).join(name);
+                                sel.insert(format!("file://{}", path.display()));
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
+                (single, sel)
             }
-        }
+            PortalContext::Screenshot(_) => {
+                // Screenshot always single-select (one URI result)
+                (true, HashSet::new())
+            }
+        };
 
         let initial_selection = selection.clone();
 
@@ -164,7 +174,7 @@ impl Session {
             socket_path: sock_path,
             child: None,
             listener: Some(listener),
-            options,
+            context,
             selection,
             initial_selection,
             created,
@@ -177,13 +187,9 @@ impl Session {
         &self.id
     }
 
-    /// Get session title (from options)
+    /// Get session title (from context)
     pub fn title(&self) -> Option<&str> {
-        if self.options.title.is_empty() {
-            None
-        } else {
-            Some(&self.options.title)
-        }
+        self.context.title()
     }
 
     /// Get creation timestamp
@@ -237,7 +243,7 @@ impl Session {
 
         let bin_dir = self.dir.join("bin");
 
-        let envs = self.options.env();
+        let envs = self.context.env();
         for (k, v) in envs.iter() {
             cmd.env(k, v);
         }
@@ -347,16 +353,18 @@ impl Session {
         use portty_ipc::{Request, Response};
 
         match req {
-            Request::GetOptions => Response::Options(self.options.clone()),
+            Request::GetOptions => Response::Options(self.context.clone()),
             Request::GetSelection => {
                 // Convert HashSet to Vec for response
                 Response::Selection(self.selection.iter().cloned().collect())
             }
             Request::Select(uris) => {
-                // Check filters and warn if selection doesn't match
-                if !self.options.filters.is_empty() {
+                // Check filters and warn if selection doesn't match (file-chooser only)
+                if let PortalContext::FileChooser(opts) = &self.context
+                    && !opts.filters.is_empty()
+                {
                     for uri in &uris {
-                        if !matches_any_filter(uri, &self.options.filters) {
+                        if !matches_any_filter(uri, &opts.filters) {
                             warn!(
                                 uri,
                                 "Selection does not match any filter (allowed but may not be intended)"

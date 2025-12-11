@@ -5,8 +5,9 @@ use zbus::connection::Builder;
 
 use crate::config::Config;
 use crate::daemon_socket::{DaemonSocket, DaemonState};
-use crate::portal::TtyFileChooser;
+use crate::portal::{TtyFileChooser, TtyScreenshot};
 use portty_ipc::portal::file_chooser::FileChooserPortal;
+use portty_ipc::portal::screenshot::ScreenshotPortal;
 
 const SERVICE_NAME: &str = "org.freedesktop.impl.portal.desktop.tty";
 const OBJECT_PATH: &str = "/org/freedesktop/portal/desktop";
@@ -62,9 +63,13 @@ impl Server {
         let builder = builder
             .serve_at(OBJECT_PATH, FileChooserPortal::from(file_chooser))?;
 
-        // Add more portals here:
-        // let builder = builder.serve_at(OBJECT_PATH, ScreenshotPortal::from(...))?;
-        // let builder = builder.serve_at(OBJECT_PATH, NotificationPortal::from(...))?;
+        info!("Registering Screenshot portal");
+        let screenshot = TtyScreenshot::new(
+            Arc::clone(&self.config),
+            Arc::clone(&self.state),
+        );
+        let builder = builder
+            .serve_at(OBJECT_PATH, ScreenshotPortal::from(screenshot))?;
 
         Ok(builder)
     }

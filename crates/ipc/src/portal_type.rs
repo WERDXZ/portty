@@ -8,11 +8,7 @@ use std::str::FromStr;
 #[non_exhaustive]
 pub enum PortalType {
     FileChooser,
-    // Future portals:
-    // Screenshot,
-    // Print,
-    // Notification,
-    // etc.
+    Screenshot,
 }
 
 impl PortalType {
@@ -20,6 +16,7 @@ impl PortalType {
     pub fn as_str(&self) -> &'static str {
         match self {
             PortalType::FileChooser => "file-chooser",
+            PortalType::Screenshot => "screenshot",
         }
     }
 }
@@ -42,6 +39,7 @@ impl FromStr for PortalType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "file-chooser" => Ok(PortalType::FileChooser),
+            "screenshot" => Ok(PortalType::Screenshot),
             _ => Err(ParsePortalTypeError(s.to_string())),
         }
     }

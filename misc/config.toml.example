@@ -44,6 +44,21 @@ exec = "submit"
 #   Queued submissions auto-apply when dialog opens.
 #   Use --queue to view: portty --queue
 
-# Future portals:
-# [screenshot]
-# exec = "foot -e screenshot-picker"
+# Screenshot portal configuration
+[screenshot]
+exec = "foot"  # default for all screenshot operations
+
+# Custom commands available in sessions
+[screenshot.bin]
+# snap = "grim -g \"$(slurp)\" /tmp/screenshot.png && sel /tmp/screenshot.png && submit"
+
+# Per-operation overrides
+# Priority: operation-specific → screenshot → root default
+
+# Screenshot: capture screen, return file URI
+[screenshot.screenshot]
+# exec = "foot"  # inherits from [screenshot]
+
+# PickColor: pick a pixel color from screen
+[screenshot.pick-color]
+# exec = "foot"  # inherits from [screenshot]

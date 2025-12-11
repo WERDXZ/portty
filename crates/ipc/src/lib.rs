@@ -5,6 +5,7 @@ pub mod protocol;
 pub mod queue;
 pub mod request;
 
+pub use ipc::context::PortalContext;
 pub use portal_type::PortalType;
 pub use protocol::{
     DaemonExtension, DaemonRequest, DaemonResponse, DaemonResponseExtension, NoExtension,

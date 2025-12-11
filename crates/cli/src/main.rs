@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use thiserror::Error;
 
-use portty_ipc::ipc::file_chooser::SessionOptions;
+use portty_ipc::ipc::context::PortalContext;
 use portty_ipc::ipc::{IpcError, read_message, write_message};
 use portty_ipc::queue::QueuedCommand;
 use portty_ipc::{
@@ -444,24 +444,35 @@ fn run_session_command(socket_path: &str, cmd: Command) -> ExitCode {
     }
 }
 
-/// Print session options
-fn print_options(opts: &SessionOptions) {
-    println!("Title: {}", opts.title);
-    println!("Mode: {}", opts.mode);
-    if let Some(ref folder) = opts.current_folder {
-        println!("Folder: {}", folder);
-    }
-    if !opts.candidates.is_empty() {
-        println!("Candidates:");
-        for c in &opts.candidates {
-            println!("  {c}");
+/// Print session options (dispatches by portal context)
+fn print_options(ctx: &PortalContext) {
+    match ctx {
+        PortalContext::FileChooser(opts) => {
+            println!("Title: {}", opts.title);
+            println!("Mode: {}", opts.mode);
+            if let Some(ref folder) = opts.current_folder {
+                println!("Folder: {}", folder);
+            }
+            if !opts.candidates.is_empty() {
+                println!("Candidates:");
+                for c in &opts.candidates {
+                    println!("  {c}");
+                }
+            }
+            if !opts.filters.is_empty() {
+                println!("Filters:");
+                for f in &opts.filters {
+                    let patterns: Vec<String> = f.patterns.iter().map(|p| p.to_string()).collect();
+                    println!("  {}: {}", f.name, patterns.join(", "));
+                }
+            }
         }
-    }
-    if !opts.filters.is_empty() {
-        println!("Filters:");
-        for f in &opts.filters {
-            let patterns: Vec<String> = f.patterns.iter().map(|p| p.to_string()).collect();
-            println!("  {}: {}", f.name, patterns.join(", "));
+        PortalContext::Screenshot(opts) => {
+            println!("Mode: {}", opts.mode);
+            if !opts.app_id.is_empty() {
+                println!("App: {}", opts.app_id);
+            }
+            println!("Modal: {}", opts.modal);
         }
     }
 }

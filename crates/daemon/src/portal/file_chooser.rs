@@ -8,6 +8,7 @@ use crate::config::{Config, FileChooserOp};
 use crate::daemon_socket::{DaemonState, RegisteredSession};
 use crate::session::{Session, SessionResult};
 use portty_ipc::PortalType;
+use portty_ipc::ipc::context::PortalContext;
 use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SelectionMode, SessionOptions};
 use portty_ipc::portal::file_chooser::{
     FileChooserError, FileChooserHandler, FileChooserResult, FileFilter,
@@ -95,7 +96,8 @@ impl TtyFileChooser {
             Vec::new()
         };
 
-        let mut session = Session::new(portal.as_str(), options, &bin)
+        let context = PortalContext::FileChooser(options);
+        let mut session = Session::new(portal.as_str(), context, &bin)
             .map_err(|e| FileChooserError::Other(format!("failed to create session: {e}")))?;
 
         // Register session and transfer any pending commands

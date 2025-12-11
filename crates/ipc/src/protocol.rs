@@ -23,7 +23,7 @@
 
 use bincode::{Decode, Encode};
 
-use crate::ipc::file_chooser::SessionOptions;
+use crate::ipc::context::PortalContext;
 use crate::queue::{QueuedCommand, Submission};
 use crate::PortalType;
 
@@ -74,8 +74,8 @@ pub enum Response<Ext> {
     /// Current selection
     Selection(Vec<String>),
 
-    /// Session options
-    Options(SessionOptions),
+    /// Session options (portal-specific context)
+    Options(PortalContext),
 
     /// Error occurred
     Error(String),

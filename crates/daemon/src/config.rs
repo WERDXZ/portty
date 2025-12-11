@@ -67,6 +67,38 @@ pub struct FileChooserExt {
     pub save_files: Option<PortalConfig>,
 }
 
+/// Screenshot operation types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenshotOp {
+    Screenshot,
+    PickColor,
+}
+
+impl ScreenshotOp {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Screenshot => "Screenshot",
+            Self::PickColor => "Pick Color",
+        }
+    }
+}
+
+impl Display for ScreenshotOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Screenshot extension - sub-operation configs
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ScreenshotExt {
+    #[serde(default)]
+    pub screenshot: Option<PortalConfig>,
+
+    #[serde(default, rename = "pick-color")]
+    pub pick_color: Option<PortalConfig>,
+}
+
 /// Root extension - all portal configs
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RootExt {
@@ -74,7 +106,7 @@ pub struct RootExt {
     pub file_chooser: Option<PortalConfig<FileChooserExt>>,
 
     #[serde(default)]
-    pub screenshot: Option<PortalConfig>,
+    pub screenshot: Option<PortalConfig<ScreenshotExt>>,
 }
 
 /// Main configuration - just a PortalConfig with RootExt
@@ -162,13 +194,48 @@ impl Config {
         bin
     }
 
-    /// Get screenshot exec
-    pub fn screenshot_exec(&self) -> Option<&str> {
-        self.ext
-            .screenshot
-            .as_ref()
-            .and_then(|s| s.exec.as_deref())
+    /// Get effective exec for screenshot operation
+    /// Priority: operation-specific → screenshot → root default
+    pub fn screenshot_exec(&self, op: ScreenshotOp) -> Option<&str> {
+        let sc = self.ext.screenshot.as_ref();
+
+        // Check operation-specific config
+        let op_exec = sc.and_then(|sc| {
+            let op_config = match op {
+                ScreenshotOp::Screenshot => sc.ext.screenshot.as_ref(),
+                ScreenshotOp::PickColor => sc.ext.pick_color.as_ref(),
+            };
+            op_config.and_then(|c| c.exec.as_deref())
+        });
+
+        // Check screenshot base config
+        let sc_exec = sc.and_then(|sc| sc.exec.as_deref());
+
+        // Fall back to root default
+        op_exec
+            .or(sc_exec)
             .or(self.exec.as_deref())
             .filter(|s| !s.is_empty())
+    }
+
+    /// Get effective bin shims for screenshot operation (merged)
+    pub fn screenshot_bin(&self, op: ScreenshotOp) -> HashMap<String, String> {
+        let mut bin = self.bin.clone();
+
+        if let Some(sc) = &self.ext.screenshot {
+            // Merge screenshot base bins
+            bin.extend(sc.bin.clone());
+
+            // Merge operation-specific bins
+            let op_config = match op {
+                ScreenshotOp::Screenshot => sc.ext.screenshot.as_ref(),
+                ScreenshotOp::PickColor => sc.ext.pick_color.as_ref(),
+            };
+            if let Some(c) = op_config {
+                bin.extend(c.bin.clone());
+            }
+        }
+
+        bin
     }
 }
