@@ -9,9 +9,11 @@ use portty_types::ipc::file_chooser::{Request, Response, SessionOptions};
 use portty_types::ipc::{read_message, write_message};
 
 /// Default commands for each portal type
-fn default_commands(portal: &str) -> &'static [&'static str] {
+/// Returns (shim_name, internal_command) pairs
+fn default_commands(portal: &str) -> &'static [(&'static str, &'static str)] {
     match portal {
-        "file-chooser" => &["select", "cancel"],
+        // "sel" shim avoids conflict with POSIX `select` builtin
+        "file-chooser" => &[("sel", "select"), ("cancel", "cancel")],
         _ => &[],
     }
 }
@@ -67,15 +69,15 @@ impl Session {
         fs::create_dir_all(&bin_dir)?;
 
         // Create default command shims
-        for cmd in default_commands(portal) {
+        for (shim_name, internal_cmd) in default_commands(portal) {
             // Skip if overridden by custom bin
-            if custom_bins.contains_key(*cmd) {
+            if custom_bins.contains_key(*shim_name) {
                 continue;
             }
-            let shim_path = bin_dir.join(cmd);
+            let shim_path = bin_dir.join(shim_name);
             let shim_content = format!(
                 "#!/bin/sh\nexec \"{}\" \"{}\" \"{}\" \"$@\"\n",
-                builtin_path, portal, cmd
+                builtin_path, portal, internal_cmd
             );
             fs::write(&shim_path, shim_content)?;
             fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))?;

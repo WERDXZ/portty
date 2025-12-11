@@ -13,10 +13,10 @@ exec = "foot"
 exec = "foot"
 
 # Custom commands available in the session
-# These are added to $PATH alongside the default builtins (select, cancel)
+# These are added to $PATH alongside the default builtins (sel, cancel)
 [file-chooser.bin]
 # Quick pick with fzf
-pick = "fzf --multi | select --stdin"
+pick = "fzf --multi | sel --stdin"
 # Preview files
 preview = "bat \"$@\""
 

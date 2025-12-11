@@ -52,8 +52,8 @@ The session bin directory (`$PORTTY_DIR/bin`) is prepended to `$PATH`.
 ```
 /tmp/portty/<uid>/<session-id>/
 ├── bin/
-│   ├── select    # Shell shim -> portty-builtin file_chooser select
-│   └── cancel    # Shell shim -> portty-builtin file_chooser cancel
+│   ├── sel       # Shell shim -> portty-builtin file-chooser select
+│   └── cancel    # Shell shim -> portty-builtin file-chooser cancel
 ├── sock          # Unix domain socket for IPC
 └── portal        # Portal type identifier
 ```
@@ -62,22 +62,22 @@ The session bin directory (`$PORTTY_DIR/bin`) is prepended to `$PATH`.
 
 Commands are generated per-session as shell shims. For the file chooser portal:
 
-### `select`
+### `sel`
 
 Manage file selection.
 
 ```bash
 # Select files (completes the dialog)
-select file1.txt file2.txt
+sel file1.txt file2.txt
 
 # Select files from stdin
-find . -name "*.rs" | select --stdin
+find . -name "*.rs" | sel --stdin
 
 # Show current selection
-select
+sel
 
 # Show session options (filters, title, etc.)
-select --options
+sel --options
 ```
 
 ### `cancel`
@@ -169,10 +169,11 @@ pub enum Response {
 2. **Register commands** in `crates/daemon/src/session.rs`:
 
 ```rust
-fn portal_commands(portal: &str) -> &'static [&'static str] {
+// Returns (shim_name, internal_command) pairs
+fn default_commands(portal: &str) -> &'static [(&'static str, &'static str)] {
     match portal {
-        "file_chooser" => &["select", "cancel"],
-        "my_portal" => &["my_cmd", "cancel"],
+        "file-chooser" => &[("sel", "select"), ("cancel", "cancel")],
+        "my-portal" => &[("my_cmd", "my_cmd"), ("cancel", "cancel")],
         _ => &[],
     }
 }
