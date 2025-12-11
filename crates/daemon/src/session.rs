@@ -16,7 +16,7 @@ use tracing::warn;
 fn default_commands(portal: &str) -> &'static [(&'static str, &'static str)] {
     match portal {
         // "sel" shim avoids conflict with POSIX `select` builtin
-        "file-chooser" => &[("sel", "select"), ("submit", "submit"), ("cancel", "cancel")],
+        "file-chooser" => &[("sel", "select"), ("desel", "deselect"), ("submit", "submit"), ("cancel", "cancel")],
         _ => &[],
     }
 }
