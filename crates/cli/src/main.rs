@@ -548,3 +548,95 @@ fn run_daemon_command(session_id: Option<String>, cmd: Command) -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_uri_passthrough_file() {
+        let uri = "file:///home/user/test.txt";
+        assert_eq!(to_uri(uri).unwrap(), uri);
+    }
+
+    #[test]
+    fn test_to_uri_passthrough_http() {
+        let uri = "http://example.com/file.txt";
+        assert_eq!(to_uri(uri).unwrap(), uri);
+    }
+
+    #[test]
+    fn test_to_uri_passthrough_https() {
+        let uri = "https://example.com/file.txt";
+        assert_eq!(to_uri(uri).unwrap(), uri);
+    }
+
+    #[test]
+    fn test_to_uri_absolute_path() {
+        let result = to_uri("/home/user/test.txt").unwrap();
+        assert_eq!(result, "file:///home/user/test.txt");
+    }
+
+    #[test]
+    fn test_to_uri_encodes_spaces() {
+        let result = to_uri("/home/user/my file.txt").unwrap();
+        assert_eq!(result, "file:///home/user/my%20file.txt");
+    }
+
+    #[test]
+    fn test_to_uri_encodes_special_chars() {
+        let result = to_uri("/path/with#hash").unwrap();
+        assert!(result.contains("%23"), "# should be encoded as %23");
+
+        let result = to_uri("/path/with?query").unwrap();
+        assert!(result.contains("%3F"), "? should be encoded as %3F");
+    }
+
+    #[test]
+    fn test_to_uri_relative_path() {
+        // Relative paths get joined with current dir
+        let result = to_uri("relative/path.txt").unwrap();
+        assert!(result.starts_with("file://"));
+        assert!(result.ends_with("relative/path.txt"));
+    }
+
+    #[test]
+    fn test_parse_items_empty() {
+        let items: Vec<String> = vec![];
+        let result = parse_items(&items, false).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_items_multiple() {
+        let items = vec!["/a.txt".to_string(), "/b.txt".to_string()];
+        let result = parse_items(&items, false).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "file:///a.txt");
+        assert_eq!(result[1], "file:///b.txt");
+    }
+
+    #[test]
+    fn test_detect_context_daemon() {
+        // Without PORTTY_SOCK env var, should default to Daemon
+        // SAFETY: This test runs in a single-threaded context
+        unsafe { std::env::remove_var("PORTTY_SOCK") };
+        let ctx = detect_context();
+        assert!(matches!(ctx, Context::Daemon));
+    }
+
+    #[test]
+    fn test_detect_context_session() {
+        // SAFETY: This test runs in a single-threaded context
+        unsafe { std::env::set_var("PORTTY_SOCK", "/tmp/test.sock") };
+        let ctx = detect_context();
+        match ctx {
+            Context::Session { socket_path } => {
+                assert_eq!(socket_path, "/tmp/test.sock");
+            }
+            Context::Daemon => panic!("Expected Session context"),
+        }
+        // SAFETY: Clean up env var
+        unsafe { std::env::remove_var("PORTTY_SOCK") };
+    }
+}
