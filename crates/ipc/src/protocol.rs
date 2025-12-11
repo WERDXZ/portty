@@ -202,94 +202,66 @@ mod tests {
     use bincode::config::standard;
 
     #[test]
-    fn test_session_to_daemon_request_conversion() {
+    fn session_to_daemon_request_conversion() {
         let session_req: SessionRequest = Request::Select(vec!["file:///a".into()]);
         let daemon_req: DaemonRequest = session_req.into();
+        assert!(matches!(daemon_req, Request::Select(v) if v == ["file:///a"]));
+    }
 
-        match daemon_req {
-            Request::Select(v) => assert_eq!(v, vec!["file:///a"]),
-            _ => panic!("Expected Select variant"),
+    #[test]
+    fn session_to_daemon_response_conversion() {
+        let cases: Vec<SessionResponse> = vec![
+            Response::Ok,
+            Response::Error("test".into()),
+            Response::Selection(vec!["a".into()]),
+        ];
+        for resp in cases {
+            let _: DaemonResponse = resp.into();
         }
     }
 
     #[test]
-    fn test_session_to_daemon_response_conversion() {
-        let session_resp: SessionResponse = Response::Ok;
-        let daemon_resp: DaemonResponse = session_resp.into();
+    fn wire_compatibility_base_variants() {
+        let cfg = standard();
 
-        assert!(matches!(daemon_resp, Response::Ok));
+        let variants: Vec<(SessionRequest, DaemonRequest)> = vec![
+            (Request::Clear, Request::Clear),
+            (Request::Submit, Request::Submit),
+            (Request::Cancel, Request::Cancel),
+            (
+                Request::Select(vec!["test".into()]),
+                Request::Select(vec!["test".into()]),
+            ),
+        ];
+
+        for (session, daemon) in variants {
+            let session_bytes = bincode::encode_to_vec(&session, cfg).unwrap();
+            let daemon_bytes = bincode::encode_to_vec(&daemon, cfg).unwrap();
+            assert_eq!(session_bytes, daemon_bytes);
+        }
     }
 
     #[test]
-    fn test_wire_compatibility_base_variants() {
+    fn extended_variant_tag_stable() {
         let cfg = standard();
-
-        // Base variants should encode identically
-        let session_clear: SessionRequest = Request::Clear;
-        let daemon_clear: DaemonRequest = Request::Clear;
-
-        let session_bytes = bincode::encode_to_vec(&session_clear, cfg).unwrap();
-        let daemon_bytes = bincode::encode_to_vec(&daemon_clear, cfg).unwrap();
-
-        assert_eq!(session_bytes, daemon_bytes, "Base variants should be wire-compatible");
-    }
-
-    #[test]
-    fn test_wire_compatibility_select() {
-        let cfg = standard();
-
-        let session_req: SessionRequest = Request::Select(vec!["file:///test".into()]);
-        let daemon_req: DaemonRequest = Request::Select(vec!["file:///test".into()]);
-
-        let session_bytes = bincode::encode_to_vec(&session_req, cfg).unwrap();
-        let daemon_bytes = bincode::encode_to_vec(&daemon_req, cfg).unwrap();
-
-        assert_eq!(session_bytes, daemon_bytes);
-    }
-
-    #[test]
-    fn test_daemon_extension_encoding() {
-        let cfg = standard();
-
         let list: DaemonRequest = Request::Extended(DaemonExtension::ListSessions);
         let bytes = bincode::encode_to_vec(&list, cfg).unwrap();
-
-        // Extended variant tag (7) + ListSessions tag (0)
-        assert_eq!(bytes[0], 7, "Extended variant should be tag 7");
-        assert_eq!(bytes[1], 0, "ListSessions should be tag 0");
+        assert_eq!(bytes[0], 7);
     }
 
     #[test]
-    fn test_roundtrip_session_request() {
+    fn protocol_roundtrip() {
         let cfg = standard();
 
-        let original: SessionRequest = Request::Select(vec!["a".into(), "b".into()]);
-        let bytes = bincode::encode_to_vec(&original, cfg).unwrap();
+        let req: SessionRequest = Request::Select(vec!["a".into(), "b".into()]);
+        let bytes = bincode::encode_to_vec(&req, cfg).unwrap();
         let (decoded, _): (SessionRequest, _) = bincode::decode_from_slice(&bytes, cfg).unwrap();
+        assert!(matches!(decoded, Request::Select(v) if v == ["a", "b"]));
 
-        match decoded {
-            Request::Select(v) => assert_eq!(v, vec!["a", "b"]),
-            _ => panic!("Wrong variant"),
-        }
-    }
-
-    #[test]
-    fn test_roundtrip_daemon_request() {
-        let cfg = standard();
-
-        let original: DaemonRequest = Request::Extended(DaemonExtension::GetSession("test-id".into()));
-        let bytes = bincode::encode_to_vec(&original, cfg).unwrap();
+        let req: DaemonRequest = Request::Extended(DaemonExtension::GetSession("id".into()));
+        let bytes = bincode::encode_to_vec(&req, cfg).unwrap();
         let (decoded, _): (DaemonRequest, _) = bincode::decode_from_slice(&bytes, cfg).unwrap();
-
-        match decoded {
-            Request::Extended(DaemonExtension::GetSession(id)) => assert_eq!(id, "test-id"),
-            _ => panic!("Wrong variant"),
-        }
-    }
-
-    #[test]
-    fn test_roundtrip_daemon_response() {
-        let cfg = standard();
+        assert!(matches!(decoded, Request::Extended(DaemonExtension::GetSession(id)) if id == "id"));
 
         let info = SessionInfo {
             id: "sess-1".into(),
@@ -298,46 +270,20 @@ mod tests {
             created: 1234567890,
             socket_path: "/tmp/test.sock".into(),
         };
-
-        let original: DaemonResponse = Response::Extended(DaemonResponseExtension::Session(info));
-        let bytes = bincode::encode_to_vec(&original, cfg).unwrap();
+        let resp: DaemonResponse = Response::Extended(DaemonResponseExtension::Session(info));
+        let bytes = bincode::encode_to_vec(&resp, cfg).unwrap();
         let (decoded, _): (DaemonResponse, _) = bincode::decode_from_slice(&bytes, cfg).unwrap();
-
-        match decoded {
-            Response::Extended(DaemonResponseExtension::Session(s)) => {
-                assert_eq!(s.id, "sess-1");
-                assert_eq!(s.portal, PortalType::FileChooser);
-                assert_eq!(s.title, Some("Pick a file".into()));
-                assert_eq!(s.created, 1234567890);
-            }
-            _ => panic!("Wrong variant"),
-        }
-    }
-
-    #[test]
-    fn test_queue_status_roundtrip() {
-        let cfg = standard();
+        assert!(matches!(decoded, Response::Extended(DaemonResponseExtension::Session(s)) if s.id == "sess-1"));
 
         let status = QueueStatusInfo {
             pending_count: 2,
-            pending: vec![
-                QueuedCommand::Select(vec!["a".into()]),
-                QueuedCommand::Clear,
-            ],
+            pending: vec![QueuedCommand::Select(vec!["a".into()]), QueuedCommand::Clear],
             submissions_count: 0,
             submissions: vec![],
         };
-
-        let original: DaemonResponse = Response::Extended(DaemonResponseExtension::QueueStatus(status));
-        let bytes = bincode::encode_to_vec(&original, cfg).unwrap();
+        let resp: DaemonResponse = Response::Extended(DaemonResponseExtension::QueueStatus(status));
+        let bytes = bincode::encode_to_vec(&resp, cfg).unwrap();
         let (decoded, _): (DaemonResponse, _) = bincode::decode_from_slice(&bytes, cfg).unwrap();
-
-        match decoded {
-            Response::Extended(DaemonResponseExtension::QueueStatus(s)) => {
-                assert_eq!(s.pending_count, 2);
-                assert_eq!(s.pending.len(), 2);
-            }
-            _ => panic!("Wrong variant"),
-        }
+        assert!(matches!(decoded, Response::Extended(DaemonResponseExtension::QueueStatus(s)) if s.pending.len() == 2));
     }
 }

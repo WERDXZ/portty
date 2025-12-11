@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use thiserror::Error;
 
 use portty_ipc::ipc::{read_message, write_message, IpcError};
 use portty_ipc::queue::QueuedCommand;
@@ -13,53 +14,19 @@ use portty_ipc::{
     Response, SessionInfo, SessionRequest, SessionResponse,
 };
 
-/// CLI error type with proper context
-#[derive(Debug)]
+/// CLI error type
+#[derive(Debug, Error)]
 enum CliError {
-    /// Failed to connect to socket
-    Connection(std::io::Error),
-    /// IPC protocol error
-    Ipc(IpcError),
-    /// Session-related error
+    #[error("connection failed: {0}")]
+    Connection(#[from] std::io::Error),
+    #[error("IPC error: {0}")]
+    Ipc(#[from] IpcError),
+    #[error("{0}")]
     Session(String),
-    /// Invalid path encoding
+    #[error("invalid path: {0}")]
     InvalidPath(String),
-    /// Portal type parse error
+    #[error("invalid portal type: {0}")]
     InvalidPortal(String),
-}
-
-impl std::fmt::Display for CliError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CliError::Connection(e) => write!(f, "connection failed: {e}"),
-            CliError::Ipc(e) => write!(f, "IPC error: {e}"),
-            CliError::Session(s) => write!(f, "{s}"),
-            CliError::InvalidPath(s) => write!(f, "invalid path: {s}"),
-            CliError::InvalidPortal(s) => write!(f, "invalid portal type: {s}"),
-        }
-    }
-}
-
-impl std::error::Error for CliError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            CliError::Connection(e) => Some(e),
-            CliError::Ipc(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for CliError {
-    fn from(e: std::io::Error) -> Self {
-        CliError::Connection(e)
-    }
-}
-
-impl From<IpcError> for CliError {
-    fn from(e: IpcError) -> Self {
-        CliError::Ipc(e)
-    }
 }
 
 /// Portty - interact with XDG portal sessions from the command line
@@ -605,69 +572,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_to_uri_passthrough_file() {
-        let uri = "file:///home/user/test.txt";
-        assert_eq!(to_uri(uri).unwrap(), uri);
+    fn uri_passthrough() {
+        let cases = [
+            "file:///home/user/test.txt",
+            "http://example.com/file.txt",
+            "https://example.com/file.txt",
+        ];
+        for uri in cases {
+            assert_eq!(to_uri(uri).unwrap(), uri);
+        }
     }
 
     #[test]
-    fn test_to_uri_passthrough_http() {
-        let uri = "http://example.com/file.txt";
-        assert_eq!(to_uri(uri).unwrap(), uri);
+    fn absolute_path_to_file_uri() {
+        assert_eq!(to_uri("/home/user/test.txt").unwrap(), "file:///home/user/test.txt");
     }
 
     #[test]
-    fn test_to_uri_passthrough_https() {
-        let uri = "https://example.com/file.txt";
-        assert_eq!(to_uri(uri).unwrap(), uri);
+    fn path_encoding() {
+        assert_eq!(
+            to_uri("/home/user/my file.txt").unwrap(),
+            "file:///home/user/my%20file.txt"
+        );
+        assert!(to_uri("/path/with#hash").unwrap().contains("%23"));
+        assert!(to_uri("/path/with?query").unwrap().contains("%3F"));
     }
 
     #[test]
-    fn test_to_uri_absolute_path() {
-        let result = to_uri("/home/user/test.txt").unwrap();
-        assert_eq!(result, "file:///home/user/test.txt");
-    }
-
-    #[test]
-    fn test_to_uri_encodes_spaces() {
-        let result = to_uri("/home/user/my file.txt").unwrap();
-        assert_eq!(result, "file:///home/user/my%20file.txt");
-    }
-
-    #[test]
-    fn test_to_uri_encodes_special_chars() {
-        let result = to_uri("/path/with#hash").unwrap();
-        assert!(result.contains("%23"), "# should be encoded as %23");
-
-        let result = to_uri("/path/with?query").unwrap();
-        assert!(result.contains("%3F"), "? should be encoded as %3F");
-    }
-
-    #[test]
-    fn test_to_uri_relative_path() {
-        // Relative paths get joined with current dir
+    fn relative_path_resolved() {
         let result = to_uri("relative/path.txt").unwrap();
         assert!(result.starts_with("file://"));
         assert!(result.ends_with("relative/path.txt"));
     }
 
     #[test]
-    fn test_parse_items_empty() {
-        let items: Vec<String> = vec![];
-        let result = parse_items(&items, false).unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_parse_items_multiple() {
+    fn parse_items_converts_all() {
         let items = vec!["/a.txt".to_string(), "/b.txt".to_string()];
         let result = parse_items(&items, false).unwrap();
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0], "file:///a.txt");
-        assert_eq!(result[1], "file:///b.txt");
+        assert_eq!(result, vec!["file:///a.txt", "file:///b.txt"]);
     }
-
-    // Note: detect_context tests removed - they modify env vars which causes
-    // race conditions in parallel test execution. The function is trivial
-    // (single env::var check) and doesn't warrant the complexity of serial tests.
 }

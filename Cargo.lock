@@ -706,6 +706,7 @@ dependencies = [
  "clap",
  "percent-encoding",
  "portty-ipc",
+ "thiserror",
 ]
 
 [[package]]
@@ -715,6 +716,7 @@ dependencies = [
  "bincode",
  "futures-util",
  "serde",
+ "thiserror",
  "zbus",
  "zvariant",
 ]
@@ -727,6 +729,7 @@ dependencies = [
  "futures-lite",
  "portty-ipc",
  "serde",
+ "thiserror",
  "toml",
  "tracing",
  "tracing-subscriber",

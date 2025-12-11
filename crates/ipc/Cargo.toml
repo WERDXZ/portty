@@ -10,3 +10,4 @@ futures-util = "0.3"
 bincode = { version = "2", features = ["derive"] }
 # Needed for zbus/zvariant D-Bus serialization
 serde = { version = "1", features = ["derive"] }
+thiserror = "2"

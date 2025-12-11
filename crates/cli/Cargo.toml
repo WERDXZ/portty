@@ -11,3 +11,4 @@ path = "src/main.rs"
 portty-ipc = { path = "../ipc" }
 clap = { version = "4", features = ["derive"] }
 percent-encoding = "2"
+thiserror = "2"

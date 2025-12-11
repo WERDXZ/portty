@@ -16,48 +16,22 @@ use portty_ipc::{
     DaemonExtension, DaemonRequest, DaemonResponse, DaemonResponseExtension, PortalType,
     QueueStatusInfo, Request, Response, SessionInfo, SessionRequest, SessionResponse,
 };
+use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use crate::session::base_dir;
 
 /// Error type for daemon socket operations
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum DaemonError {
-    /// IPC protocol error
-    Ipc(IpcError),
-    /// Failed to connect to session socket
-    SessionConnect(std::io::Error),
-    /// Session returned an error response
+    #[error("IPC error: {0}")]
+    Ipc(#[from] IpcError),
+    #[error("session connection failed: {0}")]
+    SessionConnect(#[source] std::io::Error),
+    #[error("session error: {0}")]
     SessionError(String),
-    /// Unexpected response from session
+    #[error("unexpected response from session")]
     UnexpectedResponse,
-}
-
-impl std::fmt::Display for DaemonError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DaemonError::Ipc(e) => write!(f, "IPC error: {e}"),
-            DaemonError::SessionConnect(e) => write!(f, "session connection failed: {e}"),
-            DaemonError::SessionError(e) => write!(f, "session error: {e}"),
-            DaemonError::UnexpectedResponse => write!(f, "unexpected response from session"),
-        }
-    }
-}
-
-impl std::error::Error for DaemonError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            DaemonError::Ipc(e) => Some(e),
-            DaemonError::SessionConnect(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<IpcError> for DaemonError {
-    fn from(e: IpcError) -> Self {
-        DaemonError::Ipc(e)
-    }
 }
 
 /// Registry of active portal sessions

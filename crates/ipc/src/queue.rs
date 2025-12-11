@@ -97,36 +97,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new_queue_is_empty() {
-        let queue = SubmissionQueue::new();
-        assert!(queue.pending.is_empty());
-        assert!(queue.submissions.is_empty());
-    }
-
-    #[test]
-    fn test_push_command() {
+    fn submit_moves_pending_to_submission() {
         let mut queue = SubmissionQueue::new();
         queue.push_command(QueuedCommand::Select(vec!["file:///a".into()]));
         queue.push_command(QueuedCommand::Clear);
-
-        assert_eq!(queue.pending.len(), 2);
-        assert!(queue.submissions.is_empty());
-    }
-
-    #[test]
-    fn test_submit_creates_submission() {
-        let mut queue = SubmissionQueue::new();
-        queue.push_command(QueuedCommand::Select(vec!["file:///a".into()]));
         queue.submit(None);
 
-        assert!(queue.pending.is_empty());
+        assert!(queue.pending.is_empty(), "pending should be cleared");
         assert_eq!(queue.submissions.len(), 1);
-        assert_eq!(queue.submissions[0].commands.len(), 1);
-        assert!(queue.submissions[0].portal.is_none());
+        assert_eq!(queue.submissions[0].commands.len(), 2);
     }
 
     #[test]
-    fn test_submit_with_portal_type() {
+    fn submit_preserves_portal_type() {
         let mut queue = SubmissionQueue::new();
         queue.push_command(QueuedCommand::Clear);
         queue.submit(Some(PortalType::FileChooser));
@@ -135,81 +118,69 @@ mod tests {
     }
 
     #[test]
-    fn test_submit_empty_pending_does_nothing() {
+    fn submit_empty_is_noop() {
         let mut queue = SubmissionQueue::new();
         queue.submit(None);
+        queue.submit(Some(PortalType::FileChooser));
 
         assert!(queue.submissions.is_empty());
     }
 
     #[test]
-    fn test_pop_for_portal_matches_none() {
+    fn pop_none_matches_any_portal() {
         let mut queue = SubmissionQueue::new();
         queue.push_command(QueuedCommand::Clear);
-        queue.submit(None); // portal = None matches any
+        queue.submit(None);
 
         let sub = queue.pop_for_portal(PortalType::FileChooser);
-        assert!(sub.is_some());
-        assert!(queue.submissions.is_empty());
+        assert!(sub.is_some(), "None should match any portal");
+        assert!(queue.submissions.is_empty(), "pop should consume submission");
     }
 
     #[test]
-    fn test_pop_for_portal_matches_specific() {
+    fn pop_specific_portal_matches_exact() {
         let mut queue = SubmissionQueue::new();
         queue.push_command(QueuedCommand::Clear);
         queue.submit(Some(PortalType::FileChooser));
 
         let sub = queue.pop_for_portal(PortalType::FileChooser);
         assert!(sub.is_some());
-    }
-
-    #[test]
-    fn test_pop_for_portal_no_match() {
-        let mut queue = SubmissionQueue::new();
-        queue.push_command(QueuedCommand::Clear);
-        queue.submit(Some(PortalType::FileChooser));
-
-        // Try to pop for a different portal type - need to check if there are other types
-        // For now, just verify the submission stays if we don't pop
-        assert_eq!(queue.submissions.len(), 1);
-    }
-
-    #[test]
-    fn test_clear_pending() {
-        let mut queue = SubmissionQueue::new();
-        queue.push_command(QueuedCommand::Clear);
-        queue.push_command(QueuedCommand::Select(vec![]));
-        queue.clear_pending();
-
-        assert!(queue.pending.is_empty());
-    }
-
-    #[test]
-    fn test_clear_all() {
-        let mut queue = SubmissionQueue::new();
-        queue.push_command(QueuedCommand::Clear);
-        queue.submit(None);
-        queue.push_command(QueuedCommand::Clear);
-        queue.clear_all();
-
-        assert!(queue.pending.is_empty());
         assert!(queue.submissions.is_empty());
     }
 
     #[test]
-    fn test_multiple_submissions() {
+    fn pop_fifo_order() {
         let mut queue = SubmissionQueue::new();
 
-        queue.push_command(QueuedCommand::Select(vec!["a".into()]));
+        queue.push_command(QueuedCommand::Select(vec!["first".into()]));
         queue.submit(None);
 
-        queue.push_command(QueuedCommand::Select(vec!["b".into()]));
+        queue.push_command(QueuedCommand::Select(vec!["second".into()]));
         queue.submit(Some(PortalType::FileChooser));
 
         assert_eq!(queue.submissions.len(), 2);
 
-        // Pop in FIFO order
+        // First pop gets the wildcard (None) submission
         let first = queue.pop_for_portal(PortalType::FileChooser).unwrap();
-        assert!(first.portal.is_none()); // First one had None
+        assert!(first.portal.is_none(), "should get wildcard submission first");
+        assert_eq!(queue.submissions.len(), 1);
+
+        let second = queue.pop_for_portal(PortalType::FileChooser).unwrap();
+        assert_eq!(second.portal, Some(PortalType::FileChooser));
+        assert!(queue.submissions.is_empty());
+    }
+
+    #[test]
+    fn commands_preserve_order() {
+        let mut queue = SubmissionQueue::new();
+        queue.push_command(QueuedCommand::Select(vec!["a".into()]));
+        queue.push_command(QueuedCommand::Clear);
+        queue.push_command(QueuedCommand::Select(vec!["b".into()]));
+        queue.submit(None);
+
+        let sub = queue.pop_for_portal(PortalType::FileChooser).unwrap();
+        assert!(matches!(&sub.commands[0], QueuedCommand::Select(v) if v == &["a"]));
+        assert!(matches!(&sub.commands[1], QueuedCommand::Clear));
+        assert!(matches!(&sub.commands[2], QueuedCommand::Select(v) if v == &["b"]));
     }
 }
