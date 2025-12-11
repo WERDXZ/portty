@@ -5,8 +5,8 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 
-use portty_types::ipc::file_chooser::{Request, Response, SessionOptions};
-use portty_types::ipc::{read_message, write_message};
+use portty_ipc::ipc::file_chooser::{Request, Response, SessionOptions};
+use portty_ipc::ipc::{read_message, write_message};
 
 /// Default commands for each portal type
 /// Returns (shim_name, internal_command) pairs

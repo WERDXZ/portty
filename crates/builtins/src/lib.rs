@@ -3,7 +3,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use portty_types::ipc::{read_message, write_message, IpcError};
+use portty_ipc::ipc::{read_message, write_message, IpcError};
 
 pub mod file_chooser;
 

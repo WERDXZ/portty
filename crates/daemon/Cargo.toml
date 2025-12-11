@@ -8,7 +8,7 @@ name = "porttyd"
 path = "src/main.rs"
 
 [dependencies]
-portty-types = { path = "../types" }
+portty-ipc = { path = "../ipc" }
 zbus = "5.12.0"
 futures-lite = "2"
 serde = { version = "1", features = ["derive"] }

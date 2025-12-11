@@ -5,7 +5,7 @@ use zbus::connection::Builder;
 
 use crate::config::Config;
 use crate::portal::TtyFileChooser;
-use portty_types::portal::file_chooser::FileChooserPortal;
+use portty_ipc::portal::file_chooser::FileChooserPortal;
 
 const SERVICE_NAME: &str = "org.freedesktop.impl.portal.desktop.tty";
 const OBJECT_PATH: &str = "/org/freedesktop/portal/desktop";

@@ -2,11 +2,11 @@ use std::io::BufRead;
 use std::process::ExitCode;
 
 use clap::Parser;
-use portty_types::ipc::file_chooser::{Request, Response};
+use portty_ipc::ipc::file_chooser::{Request, Response};
 
 use crate::to_uri;
 
-fn send_request(req: &Request) -> Result<Response, portty_types::ipc::IpcError> {
+fn send_request(req: &Request) -> Result<Response, portty_ipc::ipc::IpcError> {
     crate::send_request(req)
 }
 

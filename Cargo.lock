@@ -687,12 +687,12 @@ name = "portty-builtins"
 version = "0.1.0"
 dependencies = [
  "clap",
- "portty-types",
+ "portty-ipc",
  "serde",
 ]
 
 [[package]]
-name = "portty-types"
+name = "portty-ipc"
 version = "0.1.0"
 dependencies = [
  "bincode",
@@ -708,7 +708,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "futures-lite",
- "portty-types",
+ "portty-ipc",
  "serde",
  "toml",
  "tracing",

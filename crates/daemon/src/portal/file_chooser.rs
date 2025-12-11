@@ -4,8 +4,8 @@ use tracing::{debug, info, instrument};
 
 use crate::config::Config;
 use crate::session::{Session, SessionResult};
-use portty_types::ipc::file_chooser::{Filter, FilterPattern, SessionOptions};
-use portty_types::portal::file_chooser::{
+use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SessionOptions};
+use portty_ipc::portal::file_chooser::{
     FileChooserError, FileChooserHandler, FileChooserResult, FileFilter, OpenFileOptions,
     SaveFileOptions, SaveFilesOptions, FilterPattern as PortalFilterPattern,
 };
