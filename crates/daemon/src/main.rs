@@ -1,4 +1,5 @@
 mod config;
+mod daemon_socket;
 mod portal;
 mod server;
 mod session;

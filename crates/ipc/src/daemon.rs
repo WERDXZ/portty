@@ -66,6 +66,8 @@ pub struct SessionInfo {
     pub title: Option<String>,
     /// Unix timestamp when session was created
     pub created: u64,
+    /// Path to session socket (for direct CLI connection)
+    pub socket_path: String,
 }
 
 /// Result of executing a command on a session

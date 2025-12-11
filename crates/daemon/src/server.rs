@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use tracing::info;
+use tracing::{info, warn};
 use zbus::connection::Builder;
 
 use crate::config::Config;
+use crate::daemon_socket::{DaemonSocket, SessionRegistry};
 use crate::portal::TtyFileChooser;
 use portty_ipc::portal::file_chooser::FileChooserPortal;
 
@@ -12,16 +13,29 @@ const OBJECT_PATH: &str = "/org/freedesktop/portal/desktop";
 
 pub struct Server {
     config: Arc<Config>,
+    registry: Arc<RwLock<SessionRegistry>>,
 }
 
 impl Server {
     pub fn new(config: Config) -> Self {
         Self {
             config: Arc::new(config),
+            registry: Arc::new(RwLock::new(SessionRegistry::new())),
         }
     }
 
     pub async fn run(self) -> Result<(), zbus::Error> {
+        // Start daemon socket in background thread
+        match DaemonSocket::new(Arc::clone(&self.registry)) {
+            Ok(daemon_socket) => {
+                daemon_socket.spawn();
+                info!("Daemon socket started");
+            }
+            Err(e) => {
+                warn!("Failed to create daemon socket: {e}");
+            }
+        }
+
         let builder = Builder::session()?
             .name(SERVICE_NAME)?;
 
@@ -41,8 +55,12 @@ impl Server {
 
     fn register_portals(&self, builder: Builder<'static>) -> Result<Builder<'static>, zbus::Error> {
         info!("Registering FileChooser portal");
+        let file_chooser = TtyFileChooser::new(
+            Arc::clone(&self.config),
+            Arc::clone(&self.registry),
+        );
         let builder = builder
-            .serve_at(OBJECT_PATH, FileChooserPortal::from(TtyFileChooser::new(self.config.clone())))?;
+            .serve_at(OBJECT_PATH, FileChooserPortal::from(file_chooser))?;
 
         // Add more portals here:
         // let builder = builder.serve_at(OBJECT_PATH, ScreenshotPortal::from(...))?;

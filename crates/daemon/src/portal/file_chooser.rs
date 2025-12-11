@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tracing::{debug, info, instrument};
 
 use crate::config::Config;
+use crate::daemon_socket::{RegisteredSession, SessionRegistry};
 use crate::session::{Session, SessionResult};
 use portty_ipc::ipc::file_chooser::{Filter, FilterPattern, SessionOptions};
 use portty_ipc::portal::file_chooser::{
@@ -13,12 +14,13 @@ use portty_ipc::portal::file_chooser::{
 /// File chooser handler that spawns terminals
 pub struct TtyFileChooser {
     config: Arc<Config>,
+    registry: Arc<RwLock<SessionRegistry>>,
 }
 
 impl TtyFileChooser {
-    pub fn new(config: Arc<Config>) -> Self {
+    pub fn new(config: Arc<Config>, registry: Arc<RwLock<SessionRegistry>>) -> Self {
         debug!("FileChooser initialized");
-        Self { config }
+        Self { config, registry }
     }
 
     fn run_session(
@@ -43,6 +45,19 @@ impl TtyFileChooser {
         )
         .map_err(|e| FileChooserError::Other(format!("failed to create session: {e}")))?;
 
+        // Register session before spawning
+        let session_id = session.id().to_string();
+        {
+            let mut reg = self.registry.write().unwrap();
+            reg.register(RegisteredSession {
+                id: session_id.clone(),
+                portal: session.portal().to_string(),
+                title: session.title().map(String::from),
+                created: session.created(),
+                socket_path: session.socket_path(),
+            });
+        }
+
         session
             .spawn(exec, portal)
             .map_err(|e| FileChooserError::Other(format!("failed to spawn: {e}")))?;
@@ -50,6 +65,12 @@ impl TtyFileChooser {
         let result = session
             .run()
             .map_err(|e| FileChooserError::Other(format!("session failed: {e}")))?;
+
+        // Unregister session after completion
+        {
+            let mut reg = self.registry.write().unwrap();
+            reg.unregister(&session_id);
+        }
 
         match result {
             SessionResult::Success { ref uris } => {

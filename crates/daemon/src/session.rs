@@ -20,10 +20,10 @@ fn default_commands(portal: &str) -> &'static [(&'static str, &'static str)] {
 
 /// Unique session identifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SessionId(String);
+pub struct SessionId(String);
 
 impl SessionId {
-    fn new() -> Self {
+    pub fn new() -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -32,19 +32,27 @@ impl SessionId {
         Self(format!("{:x}", ts))
     }
 
-    fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
 /// A running session
 pub struct Session {
     id: SessionId,
+    portal: String,
     dir: PathBuf,
     child: Option<Child>,
     listener: Option<UnixListener>,
     options: SessionOptions,
     selection: Vec<String>,
+    created: u64,
 }
 
 impl Session {
@@ -95,14 +103,52 @@ impl Session {
         let sock_path = dir.join("sock");
         let listener = UnixListener::bind(&sock_path)?;
 
+        // Get creation timestamp
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let created = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         Ok(Self {
             id,
+            portal: portal.to_string(),
             dir,
             child: None,
             listener: Some(listener),
             options,
             selection: Vec::new(),
+            created,
         })
+    }
+
+    /// Get session ID
+    pub fn id(&self) -> &SessionId {
+        &self.id
+    }
+
+    /// Get portal type
+    pub fn portal(&self) -> &str {
+        &self.portal
+    }
+
+    /// Get session title (from options)
+    pub fn title(&self) -> Option<&str> {
+        if self.options.title.is_empty() {
+            None
+        } else {
+            Some(&self.options.title)
+        }
+    }
+
+    /// Get creation timestamp
+    pub fn created(&self) -> u64 {
+        self.created
+    }
+
+    /// Get socket path
+    pub fn socket_path(&self) -> PathBuf {
+        self.dir.join("sock")
     }
 
     /// Spawn a terminal with the given exec command
