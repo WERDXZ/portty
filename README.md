@@ -22,16 +22,33 @@ An XDG Desktop Portal backend for TTY environments. This allows terminal-based a
 Configuration file: `~/.config/portty/config.toml`
 
 ```toml
-# Path to the portty-builtin binary
-builtin_path = "/usr/lib/portty/portty-builtin"
-
-[default]
-# Default terminal command for all portals
+# Root level = default for all portals
+# Auto-detects terminal if not set (foot, alacritty, kitty, etc.)
 exec = "foot"
 
+# File chooser portal configuration
 [file-chooser]
-# Override for file chooser portal
-exec = "foot"
+exec = "foot"  # default for all file-chooser operations
+
+# Custom commands available in sessions
+# Added to $PATH alongside default shims (sel, submit, cancel)
+[file-chooser.bin]
+pick = "fzf --multi | sel --stdin"
+preview = "bat \"$@\""
+
+# Per-operation overrides
+# Priority: operation-specific -> file-chooser -> root default
+
+# SaveFile: auto-confirm with proposed filename
+[file-chooser.save-file]
+exec = "submit"  # uses submit shim for instant confirmation
+
+# SaveFiles: auto-confirm with proposed directory
+[file-chooser.save-files]
+exec = "submit"
+
+# Headless mode (no terminal, CLI only):
+# Set exec = "" at any level, then use `portty` CLI to interact
 ```
 
 ## Session Environment
@@ -50,15 +67,18 @@ The session bin directory (`$PORTTY_DIR/bin`) is prepended to `$PATH`.
 ## Session Directory Structure
 
 ```
-/tmp/portty/<uid>/<session-id>/
-├── bin/
-│   ├── sel       # Shell shim -> portty-builtin file-chooser select
-│   └── cancel    # Shell shim -> portty-builtin file-chooser cancel
-├── sock          # Unix domain socket for IPC
-└── portal        # Portal type identifier
+/tmp/portty/<uid>/
+├── daemon.sock           # Daemon control socket (CLI <-> daemon)
+└── <session-id>/
+    ├── bin/
+    │   ├── sel           # Shell shim -> portty select
+    │   ├── submit        # Shell shim -> portty submit
+    │   └── cancel        # Shell shim -> portty cancel
+    ├── sock              # Session Unix socket for IPC
+    └── portal            # Portal type identifier
 ```
 
-## Builtin Commands
+## Session Commands
 
 Commands are generated per-session as shell shims. For the file chooser portal:
 
@@ -67,17 +87,22 @@ Commands are generated per-session as shell shims. For the file chooser portal:
 Manage file selection.
 
 ```bash
-# Select files (completes the dialog)
+# Add files to selection
 sel file1.txt file2.txt
 
 # Select files from stdin
 find . -name "*.rs" | sel --stdin
 
-# Show current selection
+# Show current selection (no args)
 sel
+```
 
-# Show session options (filters, title, etc.)
-sel --options
+### `submit`
+
+Confirm selection and complete the dialog.
+
+```bash
+submit
 ```
 
 ### `cancel`
@@ -88,9 +113,29 @@ Cancel the current operation.
 cancel
 ```
 
+## CLI Usage
+
+The `portty` CLI can control sessions from outside the spawned terminal:
+
+```bash
+# List active sessions
+portty --list
+
+# Add files to selection
+portty select file1.txt file2.txt
+
+# Submit the current session
+portty submit
+
+# Target a specific session
+portty --session <id> select file.txt
+```
+
+When multiple sessions are active, commands target the earliest (oldest) session by default.
+
 ## IPC Protocol
 
-The daemon and builtins communicate via Unix domain socket using length-prefixed bincode messages.
+Session shims communicate via Unix domain socket using length-prefixed bincode messages.
 
 ### Message Format
 
@@ -101,7 +146,7 @@ The daemon and builtins communicate via Unix domain socket using length-prefixed
 
 ### FileChooser Messages
 
-**Request** (builtin -> daemon):
+**Request** (shim -> session):
 
 ```rust
 enum Request {
@@ -112,7 +157,7 @@ enum Request {
 }
 ```
 
-**Response** (daemon -> builtin):
+**Response** (session -> shim):
 
 ```rust
 enum Response {
@@ -148,55 +193,23 @@ let mut stream = UnixStream::connect(std::env::var("PORTTY_SOCK")?)?;
 
 ## Implementing a New Portal
 
-1. **Define IPC types** in `crates/types/src/ipc/<portal>.rs`:
-
-```rust
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Request {
-    // Portal-specific requests
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Response {
-    // Portal-specific responses
-    Ok,
-    Error(String),
-}
-```
+1. **Define IPC types** in `crates/ipc/src/ipc/<portal>.rs`
 
 2. **Register commands** in `crates/daemon/src/session.rs`:
 
 ```rust
-// Returns (shim_name, internal_command) pairs
 fn default_commands(portal: &str) -> &'static [(&'static str, &'static str)] {
     match portal {
-        "file-chooser" => &[("sel", "select"), ("cancel", "cancel")],
-        "my-portal" => &[("my_cmd", "my_cmd"), ("cancel", "cancel")],
+        "file-chooser" => &[("sel", "select"), ("submit", "submit"), ("cancel", "cancel")],
+        "my-portal" => &[("my_cmd", "my_cmd"), ("submit", "submit"), ("cancel", "cancel")],
         _ => &[],
     }
 }
 ```
 
-3. **Add builtin handler** in `crates/builtins/src/`:
+3. **Implement the portal** in `crates/daemon/src/portal/<portal>.rs`
 
-Create `my_portal.rs` with a `dispatch(command, args)` function.
-
-4. **Register in main.rs**:
-
-```rust
-// crates/builtins/src/main.rs
-match portal.as_str() {
-    "file_chooser" => portty_builtins::file_chooser::dispatch(command, rest),
-    "my_portal" => portty_builtins::my_portal::dispatch(command, rest),
-    // ...
-}
-```
-
-5. **Implement the portal** in `crates/daemon/src/portal/<portal>.rs`
-
-6. **Update the portal file** in `misc/tty.portal`:
+4. **Update the portal file** in `misc/tty.portal`:
 
 ```ini
 [portal]
@@ -216,8 +229,8 @@ cargo build --release
 # Install the daemon
 install -Dm755 target/release/porttyd /usr/lib/portty/porttyd
 
-# Install the builtin binary
-install -Dm755 target/release/portty-builtin /usr/lib/portty/portty-builtin
+# Install the CLI
+install -Dm755 target/release/portty /usr/bin/portty
 
 # Install portal file
 install -Dm644 misc/tty.portal /usr/share/xdg-desktop-portal/portals/tty.portal
