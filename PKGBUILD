@@ -33,6 +33,9 @@ package() {
     # Install builtin
     install -Dm755 "target/release/portty-builtin" "$pkgdir/usr/lib/portty/portty-builtin"
 
+    # Install CLI
+    install -Dm755 "target/release/portty" "$pkgdir/usr/bin/portty"
+
     # Install portal file
     install -Dm644 "misc/tty.portal" "$pkgdir/usr/share/xdg-desktop-portal/portals/tty.portal"
 

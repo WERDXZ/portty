@@ -172,7 +172,7 @@ fn handle_request(req: DaemonRequest, registry: &Arc<RwLock<SessionRegistry>>) -
                 None => {
                     // Auto-select: use only session if exactly one exists
                     if reg.len() == 1 {
-                        reg.list().first().cloned().cloned()
+                        reg.list().into_iter().next().cloned()
                     } else if reg.is_empty() {
                         return DaemonResponse::Error("No active sessions".to_string());
                     } else {

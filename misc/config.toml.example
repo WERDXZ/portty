@@ -5,6 +5,7 @@
 # builtin_path = "/usr/lib/portty/portty-builtin"
 
 # Default terminal command for all portals
+# Set to empty string or omit for headless mode (CLI only)
 [default]
 exec = "foot"
 
@@ -12,8 +13,17 @@ exec = "foot"
 [file-chooser]
 exec = "foot"
 
+# Headless mode example - no terminal, use `portty` CLI only:
+# [file-chooser]
+# exec = ""
+#
+# Usage in headless mode:
+#   1. Browser opens file dialog
+#   2. Run: portty select /path/to/file.txt
+#   3. Run: portty submit
+
 # Custom commands available in the session
-# These are added to $PATH alongside the default builtins (sel, cancel)
+# These are added to $PATH alongside the default builtins (sel, submit, cancel)
 [file-chooser.bin]
 # Quick pick with fzf
 pick = "fzf --multi | sel --stdin"

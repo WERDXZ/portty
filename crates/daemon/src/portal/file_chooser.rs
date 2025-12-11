@@ -29,13 +29,20 @@ impl TtyFileChooser {
         options: SessionOptions,
     ) -> Result<FileChooserResult, FileChooserError> {
         let portal_config = self.config.get_portal_config(portal);
+
+        // Get exec command - None means headless mode
         let exec = portal_config
             .exec
             .as_deref()
             .or(self.config.default.exec.as_deref())
-            .ok_or_else(|| FileChooserError::Other("no exec configured".to_string()))?;
+            .filter(|s| !s.is_empty());
 
-        debug!(exec, portal, "Creating session");
+        let headless = exec.is_none();
+        if headless {
+            info!(portal, "Starting headless session (use `portty` CLI to interact)");
+        } else {
+            debug!(exec, portal, "Creating session");
+        }
 
         let mut session = Session::new(
             portal,
@@ -58,9 +65,12 @@ impl TtyFileChooser {
             });
         }
 
-        session
-            .spawn(exec, portal)
-            .map_err(|e| FileChooserError::Other(format!("failed to spawn: {e}")))?;
+        // Only spawn terminal in non-headless mode
+        if let Some(exec) = exec {
+            session
+                .spawn(exec, portal)
+                .map_err(|e| FileChooserError::Other(format!("failed to spawn: {e}")))?;
+        }
 
         let result = session
             .run()

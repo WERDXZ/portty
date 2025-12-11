@@ -190,6 +190,9 @@ impl Session {
     }
 
     /// Run the session, handling IPC and waiting for completion
+    ///
+    /// In terminal mode (child process exists): exits when terminal closes
+    /// In headless mode (no child): waits for explicit Submit/Cancel via IPC
     pub fn run(&mut self) -> std::io::Result<SessionResult> {
         let listener = self.listener.take().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::Other, "no listener")
@@ -199,20 +202,26 @@ impl Session {
         listener.set_nonblocking(true)?;
 
         let mut cancelled = false;
+        let mut submitted = false;
+        let headless = self.child.is_none();
 
         loop {
-            // Check if child is still running
+            // Check if child is still running (only in terminal mode)
             if let Some(ref mut child) = self.child {
                 match child.try_wait()? {
                     Some(_status) => {
-                        // Child exited normally - confirm with current selection
+                        // Child exited - treat as implicit submit
+                        submitted = true;
                         break;
                     }
                     None => {
                         // Still running, check for IPC
                     }
                 }
-            } else {
+            }
+
+            // In headless mode, exit only on explicit submit/cancel
+            if headless && (submitted || cancelled) {
                 break;
             }
 
@@ -224,7 +233,7 @@ impl Session {
                     // Handle request
                     match read_message::<Request>(&mut stream) {
                         Ok(req) => {
-                            let resp = self.handle_request(req, &mut cancelled);
+                            let resp = self.handle_request(req, &mut cancelled, &mut submitted);
                             let _ = write_message(&mut stream, &resp);
                         }
                         Err(e) => {
@@ -242,21 +251,27 @@ impl Session {
             }
         }
 
-        // Determine result based on cancelled flag and selection
+        // Determine result
         let result = if cancelled {
             SessionResult::Cancelled
-        } else if self.selection.is_empty() {
-            SessionResult::Cancelled
-        } else {
+        } else if submitted && !self.selection.is_empty() {
             SessionResult::Success {
                 uris: self.selection.clone(),
             }
+        } else {
+            // No selection or not submitted properly
+            SessionResult::Cancelled
         };
 
         Ok(result)
     }
 
-    fn handle_request(&mut self, req: Request, cancelled: &mut bool) -> Response {
+    fn handle_request(
+        &mut self,
+        req: Request,
+        cancelled: &mut bool,
+        submitted: &mut bool,
+    ) -> Response {
         match req {
             Request::GetOptions => Response::Options(self.options.clone()),
             Request::GetSelection => Response::Selection(self.selection.clone()),
@@ -279,7 +294,8 @@ impl Session {
                 Response::Ok
             }
             Request::Submit => {
-                // Kill the child process (will trigger loop exit with success)
+                *submitted = true;
+                // Kill the child process if running (will trigger loop exit)
                 if let Some(ref mut child) = self.child {
                     let _ = child.kill();
                 }
@@ -287,7 +303,7 @@ impl Session {
             }
             Request::Cancel => {
                 *cancelled = true;
-                // Kill the child process
+                // Kill the child process if running
                 if let Some(ref mut child) = self.child {
                     let _ = child.kill();
                 }

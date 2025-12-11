@@ -1,0 +1,13 @@
+[package]
+name = "portty"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "portty"
+path = "src/main.rs"
+
+[dependencies]
+portty-ipc = { path = "../ipc" }
+clap = { version = "4", features = ["derive"] }
+percent-encoding = "2"
