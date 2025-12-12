@@ -1,7 +1,7 @@
 # Maintainer: werdxz
 
 pkgname=portty-git
-pkgver=r4.2b533ff
+pkgver=r5.829740a
 pkgrel=1
 pkgdesc="XDG Desktop Portal backend for TTY environments"
 arch=('x86_64')

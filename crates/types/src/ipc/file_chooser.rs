@@ -18,6 +18,9 @@ pub enum Request {
     /// Clear all selection
     Clear,
 
+    /// Submit/confirm the selection
+    Submit,
+
     /// Cancel the operation
     Cancel,
 }

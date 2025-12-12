@@ -13,7 +13,7 @@ use portty_types::ipc::{read_message, write_message};
 fn default_commands(portal: &str) -> &'static [(&'static str, &'static str)] {
     match portal {
         // "sel" shim avoids conflict with POSIX `select` builtin
-        "file-chooser" => &[("sel", "select"), ("cancel", "cancel")],
+        "file-chooser" => &[("sel", "select"), ("submit", "submit"), ("cancel", "cancel")],
         _ => &[],
     }
 }
@@ -230,6 +230,13 @@ impl Session {
             }
             Request::Clear => {
                 self.selection.clear();
+                Response::Ok
+            }
+            Request::Submit => {
+                // Kill the child process (will trigger loop exit with success)
+                if let Some(ref mut child) = self.child {
+                    let _ = child.kill();
+                }
                 Response::Ok
             }
             Request::Cancel => {

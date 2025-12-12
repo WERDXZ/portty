@@ -13,6 +13,7 @@ fn send_request(req: &Request) -> Result<Response, portty_types::ipc::IpcError> 
 pub fn dispatch(command: &str, args: &[String]) -> ExitCode {
     match command {
         "select" => cmd_select(args),
+        "submit" => cmd_submit(),
         "cancel" => cmd_cancel(),
         _ => {
             eprintln!("Unknown file_chooser command: {command}");
@@ -184,6 +185,24 @@ fn show_selection() -> ExitCode {
     }
 }
 
+
+fn cmd_submit() -> ExitCode {
+    match send_request(&Request::Submit) {
+        Ok(Response::Ok) => ExitCode::SUCCESS,
+        Ok(Response::Error(e)) => {
+            eprintln!("Error: {e}");
+            ExitCode::from(1)
+        }
+        Ok(resp) => {
+            eprintln!("Unexpected response: {resp:?}");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("Failed to submit: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
 
 fn cmd_cancel() -> ExitCode {
     match send_request(&Request::Cancel) {
