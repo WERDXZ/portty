@@ -34,15 +34,15 @@ exec = "submit"
 # Headless mode (no terminal, CLI only):
 #   Set exec = "" at any level
 #   Use `portty` CLI to interact:
-#     portty select /path/to/file.txt
+#     portty edit /path/to/file.txt
 #     portty submit
 #
 # Submission queue:
-#   Pre-queue selections before dialogs open:
-#     portty select file1.txt file2.txt
+#   Pre-queue entries before dialogs open:
+#     portty edit file1.txt file2.txt
 #     portty submit
 #   Queued submissions auto-apply when dialog opens.
-#   Use --queue to view: portty --queue
+#   View the queue: portty queue
 
 # Screenshot portal configuration
 [screenshot]

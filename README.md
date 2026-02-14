@@ -1,220 +1,324 @@
 # Portty
 
-An XDG Desktop Portal backend for TTY environments. This allows terminal-based applications to handle portal requests like file chooser dialogs by spawning a terminal with helper utilities.
+Portty routes XDG Desktop Portal D-Bus requests into plain files and Unix sockets. Anything that can read and write files can respond to portal requests — a terminal, a shell script, a keybinding daemon, or `echo`.
 
 ## Implemented Portals
 
-| Portal | Status | Description |
-|--------|--------|-------------|
-| FileChooser | ✅ | Open/save file dialogs |
+| Portal | Operations | Description |
+|--------|-----------|-------------|
+| FileChooser | `open-file`, `save-file`, `save-files` | File open/save dialogs |
+| Screenshot | `screenshot`, `pick-color` | Screen capture and color picking |
 
-## How It Works
+## Architecture
 
-1. An application requests a portal action (e.g., open file dialog)
-2. The daemon creates a session directory at `/tmp/portty/<uid>/<session-id>/`
-3. Shell shims are generated in `<session-dir>/bin/` for portal-specific commands
-4. A terminal is spawned with the session bin directory prepended to `$PATH`
-5. The user interacts with the terminal to complete the action
-6. The result is sent back to the requesting application
+```mermaid
+graph TD
+    App[Application] -->|D-Bus| Daemon[porttyd]
 
-## Configuration
+    Daemon --> Socket[daemon.sock<br>Unix socket]
+    Daemon --> FIFO[daemon.ctl<br>FIFO]
+    Daemon --> Session[Session<br>file-based state]
 
-Configuration file: `~/.config/portty/config.toml`
+    Session -->|exec| Process[Spawned process]
+    Process -->|exit triggers submit| Session
 
-```toml
-# Root level = default for all portals
-# Auto-detects terminal if not set (foot, alacritty, kitty, etc.)
-exec = "foot"
+    Session --- Files[/"submission (file)<br>options.json (file)<br>portal (file)"/]
 
-# File chooser portal configuration
-[file-chooser]
-exec = "foot"  # default for all file-chooser operations
-
-# Custom commands available in sessions
-# Added to $PATH alongside default shims (sel, submit, cancel)
-[file-chooser.bin]
-pick = "fzf --multi | sel --stdin"
-preview = "bat \"$@\""
-
-# Per-operation overrides
-# Priority: operation-specific -> file-chooser -> root default
-
-# SaveFile: auto-confirm with proposed filename
-[file-chooser.save-file]
-exec = "submit"  # uses submit shim for instant confirmation
-
-# SaveFiles: auto-confirm with proposed directory
-[file-chooser.save-files]
-exec = "submit"
-
-# Headless mode (no terminal, CLI only):
-# Set exec = "" at any level, then use `portty` CLI to interact
+    CLI[portty CLI] -->|control commands| Socket
+    CLI -->|read/write| Files
+    Script[Shell scripts<br>echo, cat, ...] -->|read/write| Files
+    Script -->|"echo submit >"| FIFO
+    Shims["Shims (sel, submit, ...)<br>= portty CLI wrappers"] --> CLI
 ```
 
-## Session Environment
+### Workspace
 
-When a terminal is spawned for a portal action, these environment variables are set:
+| Crate | Binary | Description |
+|-------|--------|-------------|
+| `crates/lib` (libportty) | — | Shared library: protocol, codec, client, paths, files, portal validation |
+| `crates/daemon` (porttyd) | `porttyd` | D-Bus service, session management, daemon socket + FIFO |
+| `crates/cli` (portty) | `portty` | CLI for interacting with sessions and the daemon |
 
-| Variable | Description |
-|----------|-------------|
-| `PORTTY_SESSION` | Unique session identifier |
-| `PORTTY_DIR` | Session directory path |
-| `PORTTY_SOCK` | Path to the IPC socket |
-| `PORTTY_PORTAL` | Portal type (e.g., `file_chooser`) |
+### Data Flow
 
-The session bin directory (`$PORTTY_DIR/bin`) is prepended to `$PATH`.
+1. An application requests a portal action via D-Bus (e.g. open file dialog)
+2. The daemon checks for a queued submission — if one exists, it auto-applies and returns immediately
+3. Otherwise, the daemon creates a session directory with file-based state (`options.json`, `submission`, `portal`)
+4. The configured `exec` command is run (typically a terminal emulator, but can be any program — even `submit` for instant auto-confirm). If the process exits, the session submits automatically
+5. The session's `submission` file can be edited by anything — the `portty` CLI, shell shims on `$PATH`, raw file I/O, or commands piped into the FIFO
+6. On submit/cancel, the daemon reads the submission file, validates it against portal constraints, and returns results via D-Bus
 
-## Session Directory Structure
+### Session Directory
 
 ```
 /tmp/portty/<uid>/
-├── daemon.sock           # Daemon control socket (CLI <-> daemon)
+├── daemon.sock                # Unix socket (CLI <-> daemon, bidirectional)
+├── daemon.ctl                 # FIFO (fire-and-forget commands)
+├── pending/submission         # Entries queued before any session exists
+├── submissions/<ts>-<portal>/ # Queued submissions (auto-applied on next dialog)
+│   └── submission
 └── <session-id>/
-    ├── bin/
-    │   ├── sel           # Shell shim -> portty select
-    │   ├── submit        # Shell shim -> portty submit
-    │   └── cancel        # Shell shim -> portty cancel
-    ├── sock              # Session Unix socket for IPC
-    └── portal            # Portal type identifier
+    ├── portal                 # "<portal>\n<operation>" (e.g. "file-chooser\nopen-file")
+    ├── options.json           # Session options (from D-Bus request)
+    ├── submission             # Current entries, one per line
+    └── bin/                   # Shell shims prepended to $PATH
+        ├── sel                # -> portty edit "$@"
+        ├── desel              # -> portty edit --remove "$@"
+        ├── reset              # -> portty edit --reset
+        ├── submit             # -> portty submit
+        ├── cancel             # -> portty cancel
+        ├── info               # -> portty info
+        └── <custom>           # From config [portal.bin] section
 ```
 
-## Session Commands
+All data operations (editing submissions) are file-based. The daemon socket handles control commands only (submit, cancel, verify, reset, list).
 
-Commands are generated per-session as shell shims. For the file chooser portal:
+## Interaction
 
-### `sel`
+There are multiple ways to interact with a session — they all do the same thing (edit files, send control commands):
 
-Manage file selection.
+### portty CLI / shims
 
-```bash
-# Add files to selection
-sel file1.txt file2.txt
-
-# Select files from stdin
-find . -name "*.rs" | sel --stdin
-
-# Show current selection (no args)
-sel
-```
-
-### `submit`
-
-Confirm selection and complete the dialog.
+The shims in `bin/` are one-line wrappers around `portty`. They're the same thing.
 
 ```bash
-submit
-```
+# These are equivalent:
+sel file1.txt file2.txt        # shim
+portty edit file1.txt file2.txt # CLI directly
 
-### `cancel`
+# Edit submission
+portty edit file1.txt file2.txt
+portty edit --stdin              # read from stdin
+portty edit --remove file1.txt   # remove entries
+portty edit --clear              # clear all
+portty edit --reset              # reset to initial state
+portty edit                      # no args = print current entries
 
-Cancel the current operation.
+# Control
+portty submit                    # confirm and complete the dialog
+portty cancel                    # cancel the operation
+portty verify                    # validate against portal constraints
+portty info                      # show options.json + submission
 
-```bash
-cancel
-```
-
-## CLI Usage
-
-The `portty` CLI can control sessions from outside the spawned terminal:
-
-```bash
-# List active sessions
-portty --list
-
-# Add files to selection
-portty select file1.txt file2.txt
-
-# Submit the current session
-portty submit
+# Management (context-independent)
+portty list                      # list active sessions
+portty queue                     # show pending + queued submissions
 
 # Target a specific session
-portty --session <id> select file.txt
+portty --session <id> submit
 ```
 
-When multiple sessions are active, commands target the earliest (oldest) session by default.
+The CLI auto-detects context via `PORTTY_SESSION` env var — inside a session terminal it operates on the session directory, outside it operates on pending entries.
 
-## IPC Protocol
+### Raw file I/O
 
-Session shims communicate via Unix domain socket using length-prefixed bincode messages.
+Since state is just files, you can skip the CLI entirely:
 
-### Message Format
+```bash
+# Read options
+cat /tmp/portty/$(id -u)/<session-id>/options.json
+
+# Write submission directly
+echo "/path/to/file.txt" >> /tmp/portty/$(id -u)/<session-id>/submission
+
+# Clear submission
+> /tmp/portty/$(id -u)/<session-id>/submission
+```
+
+### FIFO
+
+Fire-and-forget commands — useful for scripting and keybindings:
+
+```bash
+echo "submit" > /tmp/portty/$(id -u)/daemon.ctl
+echo "cancel" > /tmp/portty/$(id -u)/daemon.ctl
+echo "submit my-session-id" > /tmp/portty/$(id -u)/daemon.ctl
+```
+
+### Unix socket
+
+For bidirectional communication (when you need the response):
+
+```bash
+echo "list" | socat - UNIX-CONNECT:/tmp/portty/$(id -u)/daemon.sock
+```
+
+### Submission Queue
+
+Pre-queue entries before a dialog opens. When the next dialog arrives, the queued submission is auto-applied without running `exec`:
+
+```bash
+portty edit file1.txt file2.txt
+portty submit
+portty queue  # view the queue
+```
+
+## Daemon Control Protocol
+
+Plain text, newline-terminated. Shared by the socket and FIFO.
+
+### Request (single line)
 
 ```
-[4 bytes: message length (little-endian u32)]
-[N bytes: bincode-serialized payload]
+submit [session_id]
+cancel [session_id]
+verify [session_id]
+reset [session_id]
+list
 ```
 
-### FileChooser Messages
+When `session_id` is omitted, the earliest active session is targeted.
 
-**Request** (shim -> session):
+### Response (socket only — FIFO discards responses)
+
+```
+ok
+error: <message>
+<id>\t<portal>\t<operation>\t<created>\t<dir>\t<title>\n
+...
+ok
+```
+
+Session listing emits one tab-separated line per session, terminated by `ok`.
+
+## Configuration
+
+`~/.config/portty/config.toml` — see [`misc/config.toml.example`](misc/config.toml.example) for a full annotated example.
+
+Config resolution priority: **operation-specific > portal-specific > root default**.
+
+```toml
+exec = "foot"             # root default (auto-detected if not set)
+
+[file-chooser]
+exec = "foot"             # portal default
+
+[file-chooser.save-file]
+exec = "submit"           # operation override: auto-confirm saves
+
+[file-chooser.bin]
+pick = "fzf --multi | sel --stdin"  # custom shim on $PATH
+```
+
+Set `exec = ""` for headless mode (no process spawned, interact via CLI only).
+
+### Session Environment
+
+| Variable | Description |
+|----------|-------------|
+| `PORTTY_SESSION` | Session ID |
+| `PORTTY_DIR` | Session directory path |
+| `PORTTY_PORTAL` | Portal name (e.g. `file-chooser`) |
+| `PORTTY_OPERATION` | Operation name (e.g. `open-file`) |
+
+The session `bin/` directory is prepended to `$PATH`.
+
+## Adding a New Portal
+
+### 1. Define validation logic in libportty
+
+Create `crates/lib/src/portal/<portal>.rs`:
 
 ```rust
-enum Request {
-    GetOptions,              // Get session options
-    GetSelection,            // Get current selection
-    Select(Vec<String>),     // Select files (URIs)
-    Cancel,                  // Cancel operation
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionOptions {
+    // Fields from the D-Bus request that the session/CLI needs
+}
+
+/// Validate and transform submission entries.
+/// Called at submit time — check constraints and produce final output.
+pub fn validate(
+    operation: &str,
+    entries: &[String],
+    options: &SessionOptions,
+) -> Result<Vec<String>, String> {
+    // Validate entries against options, return transformed entries
+    Ok(entries.to_vec())
+}
+
+/// Smart add behavior (single-select replace vs multi-select append).
+pub fn add_entries(
+    sub_path: &std::path::Path,
+    entries: &[String],
+    options: &SessionOptions,
+) -> std::io::Result<super::AddResult> {
+    crate::files::append_lines(sub_path, entries)?;
+    Ok(super::AddResult::Appended(entries.len()))
 }
 ```
 
-**Response** (session -> shim):
+Register in `crates/lib/src/portal/mod.rs`:
 
 ```rust
-enum Response {
-    Options(SessionOptions), // Session options
-    Selection(Vec<String>),  // Current selection
-    Ok,                      // Success
-    Error(String),           // Error message
-}
-
-struct SessionOptions {
-    title: String,
-    multiple: bool,
-    directory: bool,
-    save_mode: bool,
-    current_name: Option<String>,
-    current_folder: Option<String>,
-    filters: Vec<Filter>,
-    current_filter: Option<usize>,
-}
+#[cfg(feature = "portal-my-portal")]
+pub mod my_portal;
 ```
 
-### Connecting to the Socket
+Add the feature to `crates/lib/Cargo.toml`:
 
-From Rust:
-
-```rust
-use std::os::unix::net::UnixStream;
-
-let mut stream = UnixStream::connect(std::env::var("PORTTY_SOCK")?)?;
-// write length-prefixed bincode message
-// read length-prefixed bincode response
+```toml
+[features]
+portal-my-portal = ["portal"]
 ```
 
-## Implementing a New Portal
+Wire it into `SessionContext::add_entries()` and `validate()` in `crates/lib/src/portal/mod.rs`.
 
-1. **Define IPC types** in `crates/ipc/src/ipc/<portal>.rs`
+### 2. Define D-Bus types in porttyd
 
-2. **Register commands** in `crates/daemon/src/session.rs`:
+Create `crates/daemon/src/dbus/<portal>.rs` implementing the `org.freedesktop.impl.portal.*` interface using `zbus`. See `dbus/file_chooser.rs` or `dbus/screenshot.rs` as examples.
+
+The key pattern: define a `Handler` trait that the portal implementation calls, and a D-Bus proxy struct that implements the zbus interface and delegates to the handler.
+
+### 3. Implement the portal handler
+
+Create `crates/daemon/src/portal/<portal>.rs`:
 
 ```rust
-fn default_commands(portal: &str) -> &'static [(&'static str, &'static str)] {
-    match portal {
-        "file-chooser" => &[("sel", "select"), ("submit", "submit"), ("cancel", "cancel")],
-        "my-portal" => &[("my_cmd", "my_cmd"), ("submit", "submit"), ("cancel", "cancel")],
-        _ => &[],
+pub struct TtyMyPortal {
+    config: Arc<Config>,
+    state: Arc<RwLock<DaemonState>>,
+}
+
+impl MyPortalHandler for TtyMyPortal {
+    async fn my_operation(&self, ...) -> Result<MyResult, MyError> {
+        let session_options = SessionOptions { /* ... */ };
+        let options_json = serde_json::to_value(&session_options)?;
+
+        let entries = super::run_session(
+            "my-portal",        // portal name
+            "my-operation",     // operation name
+            &options_json,
+            &initial_entries,
+            title.as_deref(),
+            &self.config,
+            &self.state,
+        ).await?;
+
+        // Transform entries into D-Bus result
+        Ok(MyResult::new(entries))
     }
 }
 ```
 
-3. **Implement the portal** in `crates/daemon/src/portal/<portal>.rs`
+`run_session` handles the entire lifecycle: queued submission check -> session creation -> exec spawn -> wait -> unregister -> validate.
 
-4. **Update the portal file** in `misc/tty.portal`:
+### 4. Register in the server
+
+In `crates/daemon/src/server.rs`, add to `register_portals()`:
+
+```rust
+let my_portal = TtyMyPortal::new(Arc::clone(&self.config), Arc::clone(&self.state));
+let builder = builder.serve_at(OBJECT_PATH, MyPortalProxy::from(my_portal))?;
+```
+
+### 5. Update the portal file
+
+In `misc/tty.portal`, add the interface:
 
 ```ini
-[portal]
-DBusName=org.freedesktop.impl.portal.desktop.tty
-Interfaces=org.freedesktop.impl.portal.FileChooser;org.freedesktop.impl.portal.MyPortal;
+Interfaces=...;org.freedesktop.impl.portal.MyPortal
 ```
 
 ## Building
@@ -223,13 +327,13 @@ Interfaces=org.freedesktop.impl.portal.FileChooser;org.freedesktop.impl.portal.M
 cargo build --release
 ```
 
+Requires nightly Rust (uses `linux_pidfd` and `unix_mkfifo` features).
+
 ## Installation
 
 ```bash
-# Install the daemon
+# Install binaries
 install -Dm755 target/release/porttyd /usr/lib/portty/porttyd
-
-# Install the CLI
 install -Dm755 target/release/portty /usr/bin/portty
 
 # Install portal file
