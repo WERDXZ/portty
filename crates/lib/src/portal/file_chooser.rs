@@ -94,9 +94,10 @@ pub fn validate(
             if entries.len() > 1 {
                 return Err(format!("Save mode expects 1 entry, got {}", entries.len()));
             }
+            let candidate_name = options.candidates.first().map(String::as_str);
             Ok(entries
                 .iter()
-                .map(|e| resolve_to_uri(e, current_folder))
+                .map(|e| resolve_save_file_to_uri(e, current_folder, candidate_name))
                 .collect())
         }
         "save-files" => {
@@ -141,6 +142,24 @@ pub fn validate(
             .map(|e| resolve_to_uri(e, current_folder))
             .collect()),
     }
+}
+
+/// Resolve a save-file entry to a file:// URI.
+///
+/// If the selected path is a directory and a candidate filename exists,
+/// append that filename to produce the final target file path.
+fn resolve_save_file_to_uri(
+    entry: &str,
+    current_folder: Option<&Path>,
+    candidate_name: Option<&str>,
+) -> String {
+    let selected = resolve_path(entry, current_folder);
+
+    if let Some(name) = candidate_name && !name.is_empty() && selected.is_dir() {
+        return path_to_file_uri(&selected.join(name));
+    }
+
+    path_to_file_uri(&selected)
 }
 
 /// Resolve an entry string to an absolute path, using current_folder for relative paths.
