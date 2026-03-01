@@ -1,6 +1,6 @@
 [package]
 name = "libportty"
-version = "0.2.0"
+version = "0.2.1"
 description = "Shared types, protocol, and client library for portty - build your own custom frontend for portty"
 edition.workspace = true
 license.workspace = true
