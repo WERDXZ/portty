@@ -1,12 +1,19 @@
 [package]
 name = "portty"
 version = "0.2.0"
-edition = "2024"
+description = "CLI tool for interacting with portty portal sessions"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "portty"
 path = "src/main.rs"
 
 [dependencies]
-libportty = { path = "../lib" }
+libportty = { path = "../lib", version = "0.2.0" }
 clap = { version = "4", features = ["derive"] }

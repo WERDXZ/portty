@@ -1,7 +1,14 @@
 [package]
 name = "libportty"
 version = "0.2.0"
-edition = "2024"
+description = "Shared types, protocol, and client library for portty - build your own custom frontend for portty"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["os::linux-apis"]
 
 [features]
 default = ["portal-file-chooser", "portal-screenshot"]

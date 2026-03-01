@@ -1,14 +1,21 @@
 [package]
 name = "porttyd"
 version = "0.2.0"
-edition = "2024"
+description = "xdg-desktop-portal backend daemon for TTY sessions"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["os::linux-apis"]
 
 [[bin]]
 name = "porttyd"
 path = "src/main.rs"
 
 [dependencies]
-libportty = { path = "../lib" }
+libportty = { path = "../lib", version = "0.2.0" }
 zbus = "5.12.0"
 zvariant = { version = "5.8.0", features = ["option-as-array"] }
 futures-util = "0.3"
