@@ -62,7 +62,8 @@ fn detect_terminal() -> Option<String> {
 }
 
 impl Config {
-    /// Load config from default location (~/.config/portty/config.toml)
+    /// Load config from `PORTTY_CONFIG` or the default location
+    /// (`~/.config/portty/config.toml`).
     pub fn load() -> Self {
         Self::config_path()
             .and_then(|path| std::fs::read_to_string(&path).ok())
@@ -76,9 +77,13 @@ impl Config {
             })
     }
 
-    /// Get config file path
+    /// Get config file path.
+    ///
+    /// `PORTTY_CONFIG` overrides the default config location when set.
     fn config_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|p| p.join("portty/config.toml"))
+        std::env::var_os("PORTTY_CONFIG")
+            .map(PathBuf::from)
+            .or_else(|| dirs::config_dir().map(|p| p.join("portty/config.toml")))
     }
 
     /// Resolve exec command for a portal operation.
