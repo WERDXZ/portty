@@ -3,9 +3,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 
 use libportty::{files, paths};
 use tracing::info;
@@ -177,7 +177,13 @@ impl Session {
     }
 
     /// Spawn a terminal with the given exec command
-    pub fn spawn(&mut self, exec: &str, portal: &str, operation: &str) -> std::io::Result<()> {
+    pub fn spawn(
+        &mut self,
+        exec: &str,
+        portal: &str,
+        operation: &str,
+        cwd: Option<&Path>,
+    ) -> std::io::Result<()> {
         use std::os::linux::process::CommandExt as _;
 
         let parts: Vec<&str> = exec.split_whitespace().collect();
@@ -193,6 +199,10 @@ impl Session {
         let mut cmd = Command::new(program);
         cmd.args(args);
         cmd.create_pidfd(true);
+
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
 
         let bin_dir = self.dir.join("bin");
 

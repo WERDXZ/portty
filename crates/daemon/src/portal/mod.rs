@@ -2,6 +2,7 @@ pub mod file_chooser;
 pub mod screenshot;
 
 use std::sync::{Arc, RwLock};
+use std::path::Path;
 use tracing::{debug, info};
 
 use crate::dbus::file_chooser::FileChooserError;
@@ -49,6 +50,17 @@ pub fn validate(
     options: &serde_json::Value,
 ) -> Result<Vec<String>, String> {
     libportty::portal::validate(portal, operation, entries, options)
+}
+
+fn session_cwd<'a>(portal: &str, options: &'a serde_json::Value) -> Option<&'a Path> {
+    match portal {
+        "file-chooser" => options
+            .get("current_folder")
+            .and_then(serde_json::Value::as_str)
+            .filter(|folder| !folder.is_empty())
+            .map(Path::new),
+        _ => None,
+    }
 }
 
 /// Generic session runner shared by all portal handlers.
@@ -109,8 +121,10 @@ pub async fn run_session(
     drain_pending_to(session.dir());
 
     // Spawn process
+    let cwd = session_cwd(portal, options);
+
     if let Some(ref exec) = exec
-        && let Err(e) = session.spawn(exec, portal, operation)
+        && let Err(e) = session.spawn(exec, portal, operation, cwd)
     {
         let mut st = state.write().unwrap_or_else(|e| e.into_inner());
         st.sessions.unregister(&session_id);
