@@ -62,6 +62,23 @@ fn detect_terminal() -> Option<String> {
 }
 
 impl Config {
+    fn default_bin(portal: &str, _operation: &str) -> HashMap<String, String> {
+        let mut bin = HashMap::from([
+            ("submit".to_string(), "portty submit".to_string()),
+            ("cancel".to_string(), "portty cancel".to_string()),
+            ("info".to_string(), "portty info".to_string()),
+            ("clear".to_string(), "portty clear".to_string()),
+            ("reset".to_string(), "portty reset".to_string()),
+        ]);
+
+        if portal == "file-chooser" {
+            bin.insert("sel".to_string(), "portty add path \"$@\"".to_string());
+            bin.insert("desel".to_string(), "portty remove path \"$@\"".to_string());
+        }
+
+        bin
+    }
+
     /// Load config from `PORTTY_CONFIG` or the default location
     /// (`~/.config/portty/config.toml`).
     pub fn load() -> Self {
@@ -109,7 +126,8 @@ impl Config {
     /// Resolve bin shims for a portal operation (merged from all levels).
     /// Priority: operation-specific overrides portal-level overrides root.
     pub fn resolve_bin(&self, portal: &str, operation: &str) -> HashMap<String, String> {
-        let mut bin = self.base.bin.clone();
+        let mut bin = Self::default_bin(portal, operation);
+        bin.extend(self.base.bin.clone());
 
         if let Some(portal_cfg) = self.portals.get(portal) {
             bin.extend(portal_cfg.base.bin.clone());

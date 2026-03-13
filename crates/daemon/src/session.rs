@@ -3,22 +3,13 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 
+use libportty::portal::intent::queue;
 use libportty::{files, paths};
 use tracing::info;
-
-/// Default command shims — same for all portals
-const DEFAULT_SHIMS: &[(&str, &str)] = &[
-    ("sel", "edit"),
-    ("desel", "edit --remove"),
-    ("reset", "edit --reset"),
-    ("submit", "submit"),
-    ("cancel", "cancel"),
-    ("info", "info"),
-];
 
 /// Signal sent to the session thread
 pub enum SessionSignal {
@@ -125,21 +116,11 @@ impl Session {
         };
         fs::write(dir.join("submission"), &submission_content)?;
 
-        // Create bin directory with shims
+        // Create bin directory with resolved shims
         let bin_dir = dir.join("bin");
         fs::create_dir_all(&bin_dir)?;
 
-        for (shim_name, subcommand) in DEFAULT_SHIMS {
-            if custom_bins.contains_key(*shim_name) {
-                continue;
-            }
-            let shim_path = bin_dir.join(shim_name);
-            let shim_content = format!("#!/bin/sh\nexec portty {} \"$@\"\n", subcommand);
-            fs::write(&shim_path, shim_content)?;
-            fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))?;
-        }
-
-        // Create custom bin shims
+        // Create configured bin shims (defaults are provided by Config::resolve_bin)
         for (name, command) in custom_bins {
             let shim_path = bin_dir.join(name);
             let shim_content = format!("#!/bin/sh\n{}\n", command);
@@ -297,33 +278,48 @@ impl Drop for Session {
     }
 }
 
-/// Drain pending/submission into the session's submission file, then truncate pending.
-/// Only truncates pending after a successful write to avoid data loss.
-pub fn drain_pending_to(session_dir: &Path) {
-    let pending_sub = paths::pending_dir().join("submission");
-    let content = fs::read_to_string(&pending_sub).unwrap_or_default();
-    if content.trim().is_empty() {
-        return;
-    }
+/// Drain pending queue state into the session's submission file.
+///
+/// Pending queue state is typed-only and materialized against the current
+/// portal request before being appended to the live session submission file.
+pub fn drain_pending_to(
+    session_dir: &Path,
+    portal: &str,
+    operation: &str,
+    options: &serde_json::Value,
+) {
+    if let Some(intent) = queue::read(&paths::pending_dir()) {
+        match libportty::portal::materialize_intent(portal, operation, &intent, options) {
+            Ok(entries) => {
+                let session_sub = session_dir.join("submission");
+                let written = fs::OpenOptions::new()
+                    .append(true)
+                    .open(&session_sub)
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        for entry in &entries {
+                            writeln!(f, "{entry}")?;
+                        }
+                        f.flush()
+                    });
 
-    let session_sub = session_dir.join("submission");
-    let written = fs::OpenOptions::new()
-        .append(true)
-        .open(&session_sub)
-        .and_then(|mut f| {
-            use std::io::Write;
-            f.write_all(content.as_bytes())?;
-            f.flush()
-        });
-
-    match written {
-        Ok(()) => {
-            let _ = fs::write(&pending_sub, "");
-            let count = content.lines().filter(|l| !l.is_empty()).count();
-            info!(entries = count, "Drained pending entries to session");
-        }
-        Err(e) => {
-            tracing::warn!("Failed to drain pending to session, preserving pending: {e}");
+                match written {
+                    Ok(()) => {
+                        let _ = queue::clear(&paths::pending_dir());
+                        info!(entries = entries.len(), "Drained pending intent to session");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to drain pending intent to session, preserving intent: {e}"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to materialize pending intent for session, preserving intent: {e}"
+                );
+            }
         }
     }
 }
@@ -331,12 +327,18 @@ pub fn drain_pending_to(session_dir: &Path) {
 /// Pop a queued submission from the submissions directory matching the portal type.
 ///
 /// Submission dirs are named `<timestamp>-<portal>`. Scans in FIFO order.
-pub fn pop_queued_submission(portal: &str) -> Option<Vec<String>> {
+pub fn pop_queued_submission(
+    portal: &str,
+    operation: &str,
+    options: &serde_json::Value,
+) -> Result<Option<Vec<String>>, String> {
     let subs_dir = paths::submissions_dir();
     let mut entries: Vec<_> = fs::read_dir(&subs_dir)
-        .ok()?
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
+        .ok()
+        .map(|it| it.collect::<Result<Vec<_>, _>>())
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
 
     entries.sort_by_key(|e| e.file_name());
 
@@ -351,13 +353,36 @@ pub fn pop_queued_submission(portal: &str) -> Option<Vec<String>> {
         let dir_portal = dir_name.split_once('-').map(|(_, p)| p).unwrap_or("any");
 
         if dir_portal == "any" || dir_portal == portal {
-            let submission = files::read_lines(&sub_dir.join("submission"));
+            let Some(intent) = queue::read(&sub_dir) else {
+                tracing::info!(
+                    queued = %sub_dir.display(),
+                    portal,
+                    operation,
+                    "Skipping queued submission without intent"
+                );
+                continue;
+            };
+
+            let submission =
+                match libportty::portal::materialize_intent(portal, operation, &intent, options) {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        tracing::info!(
+                            queued = %sub_dir.display(),
+                            portal,
+                            operation,
+                            error = %e,
+                            "Skipping incompatible queued intent"
+                        );
+                        continue;
+                    }
+                };
             let _ = fs::remove_dir_all(&sub_dir);
-            return Some(submission);
+            return Ok(Some(submission));
         }
     }
 
-    None
+    Ok(None)
 }
 
 /// Result from a session

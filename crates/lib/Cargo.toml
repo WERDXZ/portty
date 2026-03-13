@@ -1,6 +1,6 @@
 [package]
 name = "libportty"
-version = "0.2.1"
+version = "0.3.0"
 description = "Shared types, protocol, and client library for portty - build your own custom frontend for portty"
 edition.workspace = true
 license.workspace = true
@@ -21,3 +21,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 thiserror = "2"
 url = { version = "2", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::files;
 
 use super::AddResult;
+use super::intent::{Cardinality, Intent, IntentFamily};
 
 /// How the file chooser session operates
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +145,65 @@ pub fn validate(
     }
 }
 
+pub fn materialize_intent(
+    operation: &str,
+    intent: &Intent,
+    options: &SessionOptions,
+) -> Result<Vec<String>, String> {
+    match operation {
+        "open-file" => {
+            if options.mode == SelectionMode::Save || options.mode == SelectionMode::SaveMultiple {
+                return Err("open-file cannot use save mode options".to_string());
+            }
+            if intent.family != IntentFamily::Path {
+                return Err(format!(
+                    "open-file expects path intent, got {}",
+                    intent.family
+                ));
+            }
+            if !matches!(options.mode, SelectionMode::Pick { multiple: true, .. })
+                && intent.cardinality == Cardinality::Multi
+            {
+                return Err("open-file single-pick mode does not accept multiple paths".to_string());
+            }
+            validate(operation, &intent.values(), options)
+        }
+        "save-file" => {
+            if intent.family != IntentFamily::Path {
+                return Err(format!(
+                    "save-file expects path intent, got {}",
+                    intent.family
+                ));
+            }
+            if intent.cardinality != Cardinality::Single {
+                return Err("save-file expects a single path".to_string());
+            }
+            validate(operation, &intent.values(), options)
+        }
+        "save-files" => {
+            if intent.family != IntentFamily::Directory {
+                return Err(format!(
+                    "save-files expects directory intent, got {}",
+                    intent.family
+                ));
+            }
+            if intent.cardinality != Cardinality::Single {
+                return Err("save-files expects a single directory".to_string());
+            }
+
+            let values = intent.values();
+            let dir = values.first().ok_or("No directory in intent")?;
+            let path = Path::new(dir);
+            if !path.is_dir() {
+                return Err(format!("save-files expects a directory, got '{}'", dir));
+            }
+
+            validate(operation, &values, options)
+        }
+        _ => Err(format!("unsupported file chooser operation: {operation}")),
+    }
+}
+
 /// Resolve a save-file entry to a file:// URI.
 ///
 /// If the selected path is a directory and a candidate filename exists,
@@ -155,7 +215,10 @@ fn resolve_save_file_to_uri(
 ) -> String {
     let selected = resolve_path(entry, current_folder);
 
-    if let Some(name) = candidate_name && !name.is_empty() && selected.is_dir() {
+    if let Some(name) = candidate_name
+        && !name.is_empty()
+        && selected.is_dir()
+    {
         return path_to_file_uri(&selected.join(name));
     }
 

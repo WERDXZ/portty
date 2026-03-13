@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::files;
 
 use super::AddResult;
+use super::intent::{Cardinality, Intent, IntentFamily};
 
 /// Screenshot operation mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +57,36 @@ pub fn validate(operation: &str, entries: &[String]) -> Result<Vec<String>, Stri
             Ok(vec![color_str.to_string()])
         }
         _ => Ok(entries.to_vec()),
+    }
+}
+
+pub fn materialize_intent(operation: &str, intent: &Intent) -> Result<Vec<String>, String> {
+    match operation {
+        "screenshot" => {
+            if intent.family != IntentFamily::Path {
+                return Err(format!(
+                    "screenshot expects path intent, got {}",
+                    intent.family
+                ));
+            }
+            if intent.cardinality != Cardinality::Single {
+                return Err("screenshot expects a single path".to_string());
+            }
+            validate(operation, &intent.values())
+        }
+        "pick-color" => {
+            if intent.family != IntentFamily::Color {
+                return Err(format!(
+                    "pick-color expects color intent, got {}",
+                    intent.family
+                ));
+            }
+            if intent.cardinality != Cardinality::Single {
+                return Err("pick-color expects a single color".to_string());
+            }
+            validate(operation, &intent.values())
+        }
+        _ => Err(format!("unsupported screenshot operation: {operation}")),
     }
 }
 

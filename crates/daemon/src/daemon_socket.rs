@@ -15,6 +15,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 
 use libportty::codec::{read_request, write_response};
+use libportty::portal::intent::queue;
 use libportty::{Request, Response, SessionInfo};
 use libportty::{files, paths};
 use tracing::{debug, info, warn};
@@ -278,7 +279,15 @@ fn handle_submit(session_id: Option<String>, state: &Arc<RwLock<DaemonState>>) -
     let session = resolve_session(&st, session_id.as_deref());
 
     if let Some(session) = session {
-        drain_pending_to(&session.dir);
+        let options: serde_json::Value = match fs::read_to_string(session.dir.join("options.json"))
+        {
+            Ok(json) => match serde_json::from_str(&json) {
+                Ok(v) => v,
+                Err(e) => return Response::Error(format!("Failed to parse options: {e}")),
+            },
+            Err(e) => return Response::Error(format!("Failed to read options: {e}")),
+        };
+        drain_pending_to(&session.dir, &session.portal, &session.operation, &options);
         session.control.submit();
         info!(session_id = %session.id, "Signalled submit");
         Response::Ok
@@ -300,8 +309,7 @@ fn handle_cancel(session_id: Option<String>, state: &Arc<RwLock<DaemonState>>) -
         Response::Ok
     } else {
         drop(st);
-        let pending_sub = paths::pending_dir().join("submission");
-        let _ = fs::write(&pending_sub, "");
+        let _ = queue::clear(&paths::pending_dir());
         Response::Ok
     }
 }
@@ -379,12 +387,12 @@ fn resolve_session<'a>(
     }
 }
 
-/// Move pending/submission -> submissions/<ts>-any/submission
+/// Move pending queue state into submissions/<ts>-any/.
 fn move_pending_to_submissions() -> Response {
-    let pending_sub = paths::pending_dir().join("submission");
-    let entries = files::read_lines(&pending_sub);
+    let pending_dir = paths::pending_dir();
+    let pending_intent = queue::read(&pending_dir);
 
-    if entries.is_empty() {
+    if pending_intent.is_none() {
         return Response::Error("No pending entries to submit".to_string());
     }
 
@@ -398,11 +406,13 @@ fn move_pending_to_submissions() -> Response {
         return Response::Error(format!("Failed to create submission dir: {e}"));
     }
 
-    if let Err(e) = files::write_lines(&sub_dir.join("submission"), &entries) {
-        return Response::Error(format!("Failed to write submission: {e}"));
+    if let Some(intent) = pending_intent
+        && let Err(e) = queue::write(&sub_dir, &intent)
+    {
+        return Response::Error(format!("Failed to write pending intent: {e}"));
     }
 
-    let _ = fs::write(&pending_sub, "");
-    info!(entries = entries.len(), "Created submission");
+    let _ = queue::clear(&pending_dir);
+    info!("Created submission");
     Response::Ok
 }

@@ -1,8 +1,8 @@
 pub mod file_chooser;
 pub mod screenshot;
 
-use std::sync::{Arc, RwLock};
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 use tracing::{debug, info};
 
 use crate::dbus::file_chooser::FileChooserError;
@@ -77,7 +77,9 @@ pub async fn run_session(
     state: &Arc<RwLock<DaemonState>>,
 ) -> Result<Vec<String>, SessionError> {
     // Check for queued submission on disk first
-    if let Some(entries) = pop_queued_submission(portal) {
+    if let Some(entries) = pop_queued_submission(portal, operation, options)
+        .map_err(|e| SessionError::Other(format!("queued submission invalid: {e}")))?
+    {
         info!(
             portal,
             operation,
@@ -89,9 +91,6 @@ pub async fn run_session(
             info!("Queued submission was empty, cancelling");
             return Err(SessionError::Cancelled);
         }
-
-        let entries = validate(portal, operation, &entries, options)
-            .map_err(|e| SessionError::Other(format!("queued submission invalid: {e}")))?;
         info!(?entries, "Queued submission applied");
         return Ok(entries);
     }
@@ -118,7 +117,7 @@ pub async fn run_session(
     .map_err(|e| SessionError::Other(format!("failed to create session: {e}")))?;
 
     let session_id = session.id().to_string();
-    drain_pending_to(session.dir());
+    drain_pending_to(session.dir(), portal, operation, options);
 
     // Spawn process
     let cwd = session_cwd(portal, options);

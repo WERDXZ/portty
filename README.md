@@ -45,7 +45,7 @@ graph TD
 2. The daemon checks for a queued submission — if one exists, it auto-applies and returns immediately
 3. Otherwise, the daemon creates a session directory with file-based state (`options.json`, `submission`, `portal`)
 4. The configured `exec` command is run (typically a terminal emulator, but can be any program — even `submit` for instant auto-confirm). If the process exits, the session submits automatically
-5. The session's `submission` file can be edited by anything — the `portty` CLI, shell shims on `$PATH`, raw file I/O, or commands piped into the FIFO
+5. The session's `submission` file can be edited by anything — typed `portty` commands, shell shims on `$PATH`, raw file I/O, or commands piped into the FIFO
 6. On submit/cancel, the daemon reads the submission file, validates it against portal constraints, and returns results via D-Bus
 
 ### Session Directory
@@ -54,17 +54,18 @@ graph TD
 /tmp/portty/<uid>/
 ├── daemon.sock                # Unix socket (CLI <-> daemon, bidirectional)
 ├── daemon.ctl                 # FIFO (fire-and-forget commands)
-├── pending/submission         # Entries queued before any session exists
+├── pending/intent.json        # Typed intent queued before any session exists
 ├── submissions/<ts>-<portal>/ # Queued submissions (auto-applied on next dialog)
-│   └── submission
+│   └── intent.json
 └── <session-id>/
     ├── portal                 # "<portal>\n<operation>" (e.g. "file-chooser\nopen-file")
     ├── options.json           # Session options (from D-Bus request)
     ├── submission             # Current entries, one per line
     └── bin/                   # Shell shims prepended to $PATH
-        ├── sel                # -> portty edit "$@"
-        ├── desel              # -> portty edit --remove "$@"
-        ├── reset              # -> portty edit --reset
+        ├── sel                # -> portty add path "$@"
+        ├── desel              # -> portty remove path "$@"
+        ├── clear              # -> portty clear
+        ├── reset              # -> portty reset
         ├── submit             # -> portty submit
         ├── cancel             # -> portty cancel
         ├── info               # -> portty info
@@ -75,7 +76,7 @@ All data operations (editing submissions) are file-based. The daemon socket hand
 
 ## Interaction
 
-There are multiple ways to interact with a session — they all do the same thing (edit files, send control commands):
+There are multiple ways to interact with a session — they all do the same thing (update typed input, edit live files, send control commands):
 
 ### portty CLI / shims
 
@@ -84,15 +85,18 @@ The shims in `bin/` are one-line wrappers around `portty`. They're the same thin
 ```bash
 # These are equivalent:
 sel file1.txt file2.txt        # shim
-portty edit file1.txt file2.txt # CLI directly
+portty add path file1.txt file2.txt # CLI directly
 
-# Edit submission
-portty edit file1.txt file2.txt
-portty edit --stdin              # read from stdin
-portty edit --remove file1.txt   # remove entries
-portty edit --clear              # clear all
-portty edit --reset              # reset to initial state
-portty edit                      # no args = print current entries
+# Typed input
+portty add path file1.txt file2.txt
+portty add path --stdin
+portty add directory /tmp/out-dir
+portty add color '#ff00aa'
+portty remove path file1.txt
+portty set path /tmp/output.txt
+portty clear
+portty reset                     # reset a live session to initial state
+portty show
 
 # Control
 portty submit                    # confirm and complete the dialog
@@ -108,7 +112,7 @@ portty queue                     # show pending + queued submissions
 portty --session <id> submit
 ```
 
-The CLI auto-detects context via `PORTTY_SESSION` env var — inside a session terminal it operates on the session directory, outside it operates on pending entries.
+The CLI auto-detects context via `PORTTY_SESSION` env var — inside a session terminal it updates the live session submission, outside it updates the pending typed queue.
 
 ### Raw file I/O
 
@@ -145,10 +149,10 @@ echo "list" | socat - UNIX-CONNECT:/tmp/portty/$(id -u)/daemon.sock
 
 ### Submission Queue
 
-Pre-queue entries before a dialog opens. When the next dialog arrives, the queued submission is auto-applied without running `exec`:
+Pre-queue typed input before a dialog opens. When the next dialog arrives, the next compatible queued submission is auto-applied without running `exec`:
 
 ```bash
-portty edit file1.txt file2.txt
+portty add path file1.txt file2.txt
 portty submit
 portty queue  # view the queue
 ```

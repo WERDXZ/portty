@@ -1,5 +1,6 @@
 # Portty configuration
 # Place this file at ~/.config/portty/config.toml
+# Or point PORTTY_CONFIG at a custom config file path.
 
 # Root level = default for all portals
 # Auto-detects terminal if not set (foot, alacritty, kitty, etc.)
@@ -34,12 +35,12 @@ exec = "submit"
 # Headless mode (no terminal, CLI only):
 #   Set exec = "" at any level
 #   Use `portty` CLI to interact:
-#     portty edit /path/to/file.txt
+#     portty add path /path/to/file.txt
 #     portty submit
 #
 # Submission queue:
 #   Pre-queue entries before dialogs open:
-#     portty edit file1.txt file2.txt
+#     portty add path file1.txt file2.txt
 #     portty submit
 #   Queued submissions auto-apply when dialog opens.
 #   View the queue: portty queue
