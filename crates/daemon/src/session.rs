@@ -160,22 +160,21 @@ impl Session {
     /// Spawn a terminal with the given exec command
     pub fn spawn(
         &mut self,
-        exec: &str,
+        exec: &[String],
         portal: &str,
         operation: &str,
         cwd: Option<&Path>,
     ) -> std::io::Result<()> {
         use std::os::linux::process::CommandExt as _;
 
-        let parts: Vec<&str> = exec.split_whitespace().collect();
-        if parts.is_empty() {
+        if exec.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "empty exec command",
             ));
         }
 
-        let (program, args) = parts.split_first().unwrap();
+        let (program, args) = exec.split_first().unwrap();
 
         let mut cmd = Command::new(program);
         cmd.args(args);

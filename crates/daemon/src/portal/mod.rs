@@ -96,7 +96,7 @@ pub async fn run_session(
     }
 
     // Resolve config
-    let exec = config.resolve_exec(portal, operation).map(String::from);
+    let exec = config.resolve_exec(portal, operation);
     let bin = config.resolve_bin(portal, operation);
 
     let headless = exec.is_none();

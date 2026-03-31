@@ -3,12 +3,40 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ExecCommand {
+    Program(String),
+    Argv(Vec<String>),
+}
+
+impl ExecCommand {
+    fn as_argv(&self) -> Option<Vec<String>> {
+        match self {
+            Self::Program(program) => {
+                if program.is_empty() {
+                    None
+                } else {
+                    Some(vec![program.clone()])
+                }
+            }
+            Self::Argv(argv) => {
+                if argv.is_empty() || argv[0].is_empty() {
+                    None
+                } else {
+                    Some(argv.clone())
+                }
+            }
+        }
+    }
+}
+
 /// Base config fields shared at every level (root, portal, operation)
 #[derive(Debug, Clone, Default, Deserialize)]
 struct BaseConfig {
     /// Command to execute
     #[serde(default)]
-    exec: Option<String>,
+    exec: Option<ExecCommand>,
 
     /// Custom bin shims
     #[serde(default)]
@@ -45,7 +73,7 @@ pub struct Config {
 }
 
 /// Try to find a terminal emulator
-fn detect_terminal() -> Option<String> {
+fn detect_terminal() -> Option<ExecCommand> {
     let terminals = ["foot", "alacritty", "kitty", "wezterm", "ghostty", "xterm"];
 
     for term in terminals {
@@ -55,7 +83,7 @@ fn detect_terminal() -> Option<String> {
             .map(|o| o.status.success())
             .unwrap_or(false)
         {
-            return Some(term.to_string());
+            return Some(ExecCommand::Program(term.to_string()));
         }
     }
     None
@@ -105,22 +133,22 @@ impl Config {
 
     /// Resolve exec command for a portal operation.
     /// Priority: operation-specific -> portal-specific -> root default
-    pub fn resolve_exec(&self, portal: &str, operation: &str) -> Option<&str> {
+    pub fn resolve_exec(&self, portal: &str, operation: &str) -> Option<Vec<String>> {
         let portal_cfg = self.portals.get(portal);
 
         // Check operation-specific
         let op_exec = portal_cfg
             .and_then(|p| p.operations.get(operation))
-            .and_then(|o| o.base.exec.as_deref());
+            .and_then(|o| o.base.exec.as_ref());
 
         // Check portal-level
-        let portal_exec = portal_cfg.and_then(|p| p.base.exec.as_deref());
+        let portal_exec = portal_cfg.and_then(|p| p.base.exec.as_ref());
 
         // Fall back to root
         op_exec
             .or(portal_exec)
-            .or(self.base.exec.as_deref())
-            .filter(|s| !s.is_empty())
+            .or(self.base.exec.as_ref())
+            .and_then(ExecCommand::as_argv)
     }
 
     /// Resolve bin shims for a portal operation (merged from all levels).

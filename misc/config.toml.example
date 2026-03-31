@@ -5,6 +5,8 @@
 # Root level = default for all portals
 # Auto-detects terminal if not set (foot, alacritty, kitty, etc.)
 exec = "foot"
+# Or use argv form when you need arguments:
+# exec = ["kitty", "--title", "Choose Files"]
 
 # File chooser portal configuration
 [file-chooser]
@@ -22,6 +24,7 @@ preview = "bat \"$@\""
 # OpenFile: browse and select files
 [file-chooser.open-file]
 # exec = "foot"  # inherits from [file-chooser]
+# exec = ["kitty", "--title", "Choose Files"]
 
 # SaveFile: auto-confirm with proposed filename
 # Using "submit" shim immediately confirms the save location
@@ -59,7 +62,9 @@ exec = "foot"  # default for all screenshot operations
 # Screenshot: capture screen, return file URI
 [screenshot.screenshot]
 # exec = "foot"  # inherits from [screenshot]
+# exec = ["kitty", "--title", "Screenshot"]
 
 # PickColor: pick a pixel color from screen
 [screenshot.pick-color]
 # exec = "foot"  # inherits from [screenshot]
+# exec = ["kitty", "--title", "Pick Color"]

@@ -193,6 +193,7 @@ Config resolution priority: **operation-specific > portal-specific > root defaul
 
 ```toml
 exec = "foot"             # root default (auto-detected if not set)
+# exec = ["kitty", "--title", "Choose Files"]
 
 [file-chooser]
 exec = "foot"             # portal default
@@ -205,6 +206,8 @@ pick = "fzf --multi | sel --stdin"  # custom shim on $PATH
 ```
 
 Set `exec = ""` for headless mode (no process spawned, interact via CLI only).
+String `exec` values are treated as the executable name only; use array form when
+you need arguments.
 
 ### Session Environment
 
