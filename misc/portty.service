@@ -4,11 +4,9 @@ PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
-Type=simple
+Type=dbus
+BusName=org.freedesktop.impl.portal.desktop.tty
 ExecStart=/usr/lib/portty/porttyd
 Restart=on-failure
 RestartSec=5
-
-[Install]
-WantedBy=default.target
-WantedBy=graphical-session.target
+Slice=session.slice

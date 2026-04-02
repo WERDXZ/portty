@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.tty
+Exec=/usr/lib/portty/porttyd
+SystemdService=portty.service
