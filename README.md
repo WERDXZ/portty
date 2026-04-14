@@ -1,5 +1,10 @@
 # Portty
 
+[![CI](https://img.shields.io/github/actions/workflow/status/WERDXZ/portty/ci.yml?branch=main&label=ci)](https://github.com/WERDXZ/portty/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/tag/WERDXZ/portty?label=release)](https://github.com/WERDXZ/portty/releases)
+[![License](https://img.shields.io/github/license/WERDXZ/portty)](LICENSE)
+[![Homepage](https://img.shields.io/badge/homepage-projects.werdxz.info-4c1)](https://projects.werdxz.info/portty)
+
 Portty routes XDG Desktop Portal D-Bus requests into plain files and Unix sockets. Anything that can read and write files can respond to portal requests — a terminal, a shell script, a keybinding daemon, or `echo`.
 
 ## Implemented Portals
