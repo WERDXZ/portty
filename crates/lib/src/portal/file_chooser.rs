@@ -227,12 +227,11 @@ fn resolve_save_file_to_uri(
 
 /// Resolve an entry string to an absolute path, using current_folder for relative paths.
 fn resolve_path(entry: &str, current_folder: Option<&Path>) -> PathBuf {
-    if let Some(rest) = entry.strip_prefix("file://") {
-        if let Ok(url) = url::Url::parse(&format!("file://{rest}"))
-            && let Ok(path) = url.to_file_path()
-        {
-            return path;
-        }
+    if let Some(rest) = entry.strip_prefix("file://")
+        && let Ok(url) = url::Url::parse(&format!("file://{rest}"))
+        && let Ok(path) = url.to_file_path()
+    {
+        return path;
     }
 
     let path = Path::new(entry);
