@@ -227,8 +227,15 @@ fn resolve_save_file_to_uri(
 
 /// Resolve an entry string to an absolute path, using current_folder for relative paths.
 fn resolve_path(entry: &str, current_folder: Option<&Path>) -> PathBuf {
-    let path_str = entry.strip_prefix("file://").unwrap_or(entry);
-    let path = Path::new(path_str);
+    if let Some(rest) = entry.strip_prefix("file://") {
+        if let Ok(url) = url::Url::parse(&format!("file://{rest}"))
+            && let Ok(path) = url.to_file_path()
+        {
+            return path;
+        }
+    }
+
+    let path = Path::new(entry);
     if path.is_absolute() {
         path.to_path_buf()
     } else if let Some(folder) = current_folder {
@@ -294,5 +301,36 @@ pub fn add_entries(
     } else {
         files::write_lines(sub_path, &resolved)?;
         Ok(AddResult::Replaced)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_file_uri_decodes_spaces() {
+        let path = resolve_path("file:///tmp/bear%20test.jpg", None);
+        assert_eq!(path, PathBuf::from("/tmp/bear test.jpg"));
+    }
+
+    #[test]
+    fn validate_open_file_does_not_double_encode_spaces() {
+        let options = SessionOptions {
+            mode: SelectionMode::Pick {
+                multiple: false,
+                directory: false,
+            },
+            ..Default::default()
+        };
+
+        let entries = validate(
+            "open-file",
+            &["file:///tmp/bear%20test.jpg".to_string()],
+            &options,
+        )
+        .unwrap();
+
+        assert_eq!(entries, vec!["file:///tmp/bear%20test.jpg"]);
     }
 }
